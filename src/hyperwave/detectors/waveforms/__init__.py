@@ -9,9 +9,10 @@
 
 from __future__ import annotations
 
-from .base import WaveformBackend, normalize_intrinsic_batch
-from .lal_backend import LALWaveform
-from .template import DEFAULT_BBH_PARAMETERS, Template, component_masses
+from .backends.base import WaveformBackend, normalize_intrinsic_batch
+from .backends.lal_backend import LALCBCWaveform
+from .template import DEFAULT_BBH_PARAMETERS, Template
+from .parameters import component_masses
 
 try:
     from .wavelets import (
@@ -33,7 +34,7 @@ except ImportError:
 __all__ = [
     "Template",
     "WaveformBackend",
-    "LALWaveform",
+    "LALCBCWaveform",
     "DEFAULT_BBH_PARAMETERS",
     "component_masses",
     "normalize_intrinsic_batch",
@@ -53,7 +54,7 @@ __all__ = [
 def __getattr__(name):
     # Lazy import so the optional ml4gw/torch deps are only needed on use.
     if name == "ML4GWWaveform":
-        from .ml4gw_backend import ML4GWWaveform
+        from .backends.ml4gw_backend import ML4GWWaveform
 
         return ML4GWWaveform
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

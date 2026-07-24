@@ -46,6 +46,11 @@ class ML4GWModules:
     IMRPhenomPv2: Any
     TaylorF2: Any
     bilby_spins_to_lalsim: Any
+    SineGaussian: Any
+    MultiSineGaussian: Any
+    WhiteNoiseBurst: Any
+    CosmicString: Any
+    Gaussian: Any
 
 
 def require_ml4gw_modules() -> ML4GWModules:
@@ -61,6 +66,7 @@ def require_ml4gw_modules() -> ML4GWModules:
         from ml4gw.waveforms.cbc import IMRPhenomD, IMRPhenomPv2, TaylorF2
         from ml4gw.waveforms.conversion import bilby_spins_to_lalsim
         from ml4gw.waveforms.generator import TimeDomainCBCWaveformGenerator
+        from ml4gw.waveforms import SineGaussian, MultiSineGaussian, WhiteNoiseBurst, CosmicString, Gaussian
     except ImportError as exc:  # pragma: no cover - depends on optional runtime
         raise ImportError(
             "ml4gw acceleration requires the optional 'ml4gw' dependency and "
@@ -78,6 +84,11 @@ def require_ml4gw_modules() -> ML4GWModules:
         IMRPhenomPv2=IMRPhenomPv2,
         TaylorF2=TaylorF2,
         bilby_spins_to_lalsim=bilby_spins_to_lalsim,
+        SineGaussian=SineGaussian,
+        MultiSineGaussian=MultiSineGaussian,
+        WhiteNoiseBurst=WhiteNoiseBurst,
+        CosmicString=CosmicString,
+        Gaussian=Gaussian,
     )
 
 

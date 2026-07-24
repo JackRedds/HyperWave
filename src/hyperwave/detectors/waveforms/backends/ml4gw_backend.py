@@ -22,10 +22,14 @@ from __future__ import annotations
 
 import numpy as np
 
-from ...ml4gw import require_ml4gw_modules, resolve_torch_device
-from .base import WaveformBackend, normalize_intrinsic_batch
+from ....ml4gw import require_ml4gw_modules, resolve_torch_device
+from .base import (WaveformBackend, normalize_intrinsic_batch, INTRINSIC_PARAMETERS_SG,
+                   INTRINSIC_PARAMETERS_CS, INTRINSIC_PARAMETERS_GAUSSIAN, INTRINSIC_PARAMETERS_WNB,
+                   INTRINSIC_PARAMETERS_CBC)
 
-ML4GW_APPROXIMANTS = ("IMRPhenomD", "IMRPhenomPv2", "TaylorF2")
+from ..parameters import HyperwaveToCBC
+
+ML4GW_APPROXIMANTS = ("IMRPhenomD", "IMRPhenomPv2", "TaylorF2", "SineGaussian", "MultiSineGaussian", "WhiteNoiseBurst", "CosmicString", "Gaussian")
 
 
 def _chirp_mass_mass_ratio(mass_1, mass_2):
@@ -69,8 +73,88 @@ class ML4GWWaveform(WaveformBackend):
             "IMRPhenomD": self._modules.IMRPhenomD,
             "IMRPhenomPv2": self._modules.IMRPhenomPv2,
             "TaylorF2": self._modules.TaylorF2,
+            "SineGaussian": self._modules.SineGaussian,
+            "MultiSineGaussian": self._modules.MultiSineGaussian,
+            "WhiteNoiseBurst": self._modules.WhiteNoiseBurst,
+            "CosmicString": self._modules.CosmicString,
+            "Gaussian": self._modules.Gaussian
         }
-        self._approximant = approximant_map[approximant]().to(self._device)
+        parameter_map = {
+            "IMRPhenomD": INTRINSIC_PARAMETERS_CBC,
+            "IMRPhenomPv2": INTRINSIC_PARAMETERS_CBC,
+            "TaylorF2": INTRINSIC_PARAMETERS_CBC,
+            "SineGaussian": INTRINSIC_PARAMETERS_SG,
+            "MultiSineGaussian": INTRINSIC_PARAMETERS_SG,
+            "WhiteNoiseBurst": INTRINSIC_PARAMETERS_WNB,
+            "CosmicString": INTRINSIC_PARAMETERS_CS,
+            "Gaussian": INTRINSIC_PARAMETERS_GAUSSIAN
+        }
+        self._intrinsic_parameters = parameter_map[approximant]
+        self._approximant = approximant_map[approximant]
+
+    def _tensor(self, values):
+        torch = self._modules.torch
+        return torch.as_tensor(np.asarray(values, dtype=float), dtype=torch.float64, device=self._device)
+
+    def parameter_adapter(self, batch):
+        return NotImplementedError
+
+    def _phase_correction(self, hp_fd, hc_fd, batch):
+        """Override in subclasses if additional phase corrections are needed"""
+        return hp_fd, hc_fd
+
+    def _fft_correction(self, hp_fd, hc_fd, hp):
+        torch = self._modules.torch
+        # ml4gw's TimeDomainCBCWaveformGenerator places the coalescence at
+        # (duration - right_pad) within the window. The LAL backend and the
+        # template's geocent_time projection both expect the coalescence at t=0,
+        # so reference it back: H(f) -> H(f) * exp(+2j pi f t_c). Without this the
+        # geocent placement is applied twice and the waveform is time-shifted.
+        t_c = float(self.duration - self.right_pad)
+        freqs = torch.fft.rfftfreq(hp.shape[-1], d=1.0 / self.sampling_rate).to(hp_fd.device)
+        ang = (2.0 * np.pi * t_c) * freqs
+        phase = torch.complex(torch.cos(ang), torch.sin(ang))
+        hp_fd = hp_fd * phase
+        hc_fd = hc_fd * phase
+        return hp_fd, hc_fd
+
+    def polarizations(self, params):
+        torch = self._modules.torch
+        keys = list(params)
+        n = max((np.asarray(params[k]).size for k in keys), default=1) if keys else 1
+        batch = normalize_intrinsic_batch(params, n, self._intrinsic_parameters)
+
+        waveform_params = self.parameter_adapter(batch)
+        hc, hp = self._generator(**waveform_params)  # (N, T) each
+
+        # FFT to single-sided / fs convention on the analysis grid
+        hp_fd = torch.fft.rfft(hp, dim=-1) / self.sampling_rate
+        hc_fd = torch.fft.rfft(hc, dim=-1) / self.sampling_rate
+
+        hp_fd, hc_fd = self._fft_correction(hp_fd, hc_fd, hp)
+
+        hp_fd = (hp_fd).detach().cpu().numpy()
+        hc_fd = (hc_fd).detach().cpu().numpy()
+
+        hp_fd, hc_fd = self._phase_correction(hp_fd, hc_fd, batch)
+        n_freq = len(self.frequency_array)
+        hp_out = np.zeros((n, n_freq), dtype=complex)
+        hc_out = np.zeros((n, n_freq), dtype=complex)
+        m = min(n_freq, hp_fd.shape[-1])
+        hp_out[:, :m] = hp_fd[:, :m]
+        hc_out[:, :m] = hc_fd[:, :m]
+        return hp_out, hc_out
+
+
+class ML4GWCBCWaveform(ML4GWWaveform):
+    def __init__(
+        self,
+        *args,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self._approximant = self._approximant().to(self._device)
+
         self._generator = self._modules.TimeDomainCBCWaveformGenerator(
             approximant=self._approximant,
             sample_rate=self.sampling_rate,
@@ -80,11 +164,7 @@ class ML4GWWaveform(WaveformBackend):
             right_pad=self.right_pad,
         ).to(self._device)
 
-    def _tensor(self, values):
-        torch = self._modules.torch
-        return torch.as_tensor(np.asarray(values, dtype=float), dtype=torch.float64, device=self._device)
-
-    def _waveform_parameters(self, batch):
+    def parameter_adapter(self, batch):
         mass_1 = batch["mass_1"]
         mass_2 = batch["mass_2"]
         chirp_mass, mass_ratio = _chirp_mass_mass_ratio(mass_1, mass_2)
@@ -126,30 +206,8 @@ class ML4GWWaveform(WaveformBackend):
                 s2z=self._tensor(chi2z),
             )
         return params
-
-    def polarizations(self, params):
-        torch = self._modules.torch
-        keys = list(params)
-        n = max((np.asarray(params[k]).size for k in keys), default=1) if keys else 1
-        batch = normalize_intrinsic_batch(params, n)
-
-        waveform_params = self._waveform_parameters(batch)
-        hc, hp = self._generator(**waveform_params)  # (N, T) each
-
-        # FFT to single-sided / fs convention on the analysis grid
-        hp_fd = torch.fft.rfft(hp, dim=-1) / self.sampling_rate
-        hc_fd = torch.fft.rfft(hc, dim=-1) / self.sampling_rate
-        # ml4gw's TimeDomainCBCWaveformGenerator places the coalescence at
-        # (duration - right_pad) within the window. The LAL backend and the
-        # template's geocent_time projection both expect the coalescence at t=0,
-        # so reference it back: H(f) -> H(f) * exp(+2j pi f t_c). Without this the
-        # geocent placement is applied twice and the waveform is time-shifted.
-        t_c = float(self.duration - self.right_pad)
-        freqs = torch.fft.rfftfreq(hp.shape[-1], d=1.0 / self.sampling_rate).to(hp_fd.device)
-        ang = (2.0 * np.pi * t_c) * freqs
-        phase = torch.complex(torch.cos(ang), torch.sin(ang))
-        hp_fd = (hp_fd * phase).detach().cpu().numpy()
-        hc_fd = (hc_fd * phase).detach().cpu().numpy()
+    
+    def _phase_correction(self, hp_fd, hc_fd, batch):
         # ml4gw applies the coalescence phase with the opposite sign and a pi
         # offset relative to LAL: empirically arg<h_LAL | h_ml4gw> = pi - 2*phase
         # (independent of inclination/sky), so rotate each waveform by
@@ -160,13 +218,33 @@ class ML4GWWaveform(WaveformBackend):
         hp_fd = hp_fd * corr
         hc_fd = hc_fd * corr
 
-        n_freq = len(self.frequency_array)
-        hp_out = np.zeros((n, n_freq), dtype=complex)
-        hc_out = np.zeros((n, n_freq), dtype=complex)
-        m = min(n_freq, hp_fd.shape[-1])
-        hp_out[:, :m] = hp_fd[:, :m]
-        hc_out[:, :m] = hc_fd[:, :m]
-        return hp_out, hc_out
+        return hp_fd, hc_fd
+        
+    def polarizations(self, params):
+        intrinsic = HyperwaveToCBC.convert(params)
+        print(intrinsic)
+        return super().polarizations(intrinsic)
 
 
-__all__ = ["ML4GWWaveform", "ML4GW_APPROXIMANTS"]
+class ML4GWBurstWaveform(ML4GWWaveform):
+    def __init__(
+        self,
+        *args,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self._generator = self._approximant(self.sampling_rate, self.duration).to(self._device)
+
+    def parameter_adapter(self, batch):
+        params = {
+            k: self._tensor(v) for k, v in batch.items() if k in self._intrinsic_parameters
+        }
+        return params
+    
+    def polarizations(self, params):
+        return super().polarizations(params)
+
+
+__all__ = ["ML4GWWaveform", "ML4GWCBCWWaveform", "ML4GWBurstWaveform", 
+           "ML4GW_APPROXIMANTS", "component_masses"]
+

@@ -29,7 +29,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.23",
     "scipy>=1.10",
-    "matplotlib>=3.5",
+    "matplotlib<3.7",
     "lalsuite>=7.20",
     "gwpy>=3.0",
     "joblib>=1.2",
@@ -46,6 +46,9 @@ lisa = ["lisaanalysistools>=1.2.8"]
 gpu = ["cupy-cuda12x>=13.0"]
 # ml4gw requires python < 3.13; the marker keeps `pip install` working on 3.13.
 ml4gw = ["ml4gw>=0.7.12; python_version < '3.13'"]
+# ml4gw = [
+#     "ml4gw @ git+ssh://git@github.com:JackRedds/ml4gw.git"
+# ]
 dev = ["build>=1.2", "pytest>=7.4", "ruff>=0.6", "pre-commit>=3.5"]
 docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.24"]
 

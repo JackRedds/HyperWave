@@ -29,7 +29,7 @@ def _bilby_polarizations(frequency_array, approximant="IMRPhenomPv2"):
 @pytest.mark.parametrize("approximant", ["IMRPhenomPv2", "IMRPhenomD", "IMRPhenomXPHM"])
 def test_lal_backend_bit_exact_vs_bilby(segment, approximant):
 
-    from hyperwave.detectors.waveforms.lal_backend import LALWaveform
+    from hyperwave.detectors.waveforms.backends.lal_backend import LALWaveform
 
     farr = segment["frequency_array"]
     # Non-precessing intrinsic params (bilby convention).

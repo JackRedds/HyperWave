@@ -17,7 +17,8 @@ from __future__ import annotations
 import numpy as np
 from joblib import Parallel, delayed
 
-from .base import WaveformBackend, normalize_intrinsic_batch
+from .base import WaveformBackend, normalize_intrinsic_batch, INTRINSIC_PARAMETERS_CBC
+from ..parameters import HyperwaveToCBC
 
 # bilby/lal constants (matched exactly for numerical agreement)
 PARSEC = 3.085677581491367e16
@@ -41,7 +42,7 @@ def _spins_to_lalsim(theta_jn, phi_jl, tilt_1, tilt_2, phi_12, a_1, a_2,
     )
 
 
-class LALWaveform(WaveformBackend):
+class LALCBCWaveform(WaveformBackend):
     def __init__(
         self,
         frequency_array,
@@ -191,12 +192,13 @@ class LALWaveform(WaveformBackend):
             hc[self._bounds] *= shift
 
         return hp, hc
-
+    
     # -- public -----------------------------------------------------------
     def polarizations(self, params):
-        keys = list(params)
-        n = max((np.asarray(params[k]).size for k in keys), default=1) if keys else 1
-        batch = normalize_intrinsic_batch(params, n)
+        intrinsic = HyperwaveToCBC.convert(params)
+        keys = list(intrinsic)
+        n = max((np.asarray(intrinsic[k]).size for k in keys), default=1) if keys else 1
+        batch = normalize_intrinsic_batch(intrinsic, n, INTRINSIC_PARAMETERS_CBC)
         rows = [{k: float(batch[k][i]) for k in batch} for i in range(n)]
 
         if self.n_jobs > 1 and n > 1:
@@ -214,4 +216,4 @@ class LALWaveform(WaveformBackend):
         return hp, hc
 
 
-__all__ = ["LALWaveform", "PARSEC", "SOLAR_MASS"]
+__all__ = ["LALCBCWaveform", "PARSEC", "SOLAR_MASS"]

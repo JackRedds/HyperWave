@@ -29,7 +29,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 #: canonical intrinsic parameter names, in batch dicts
-INTRINSIC_PARAMETERS = (
+INTRINSIC_PARAMETERS_CBC = (
     "mass_1",
     "mass_2",
     "luminosity_distance",
@@ -46,6 +46,44 @@ INTRINSIC_PARAMETERS = (
     "eccentricity",
 )
 
+INTRINSIC_PARAMETERS_SG = {
+    "quality",
+    "frequency",
+    "hrss",
+    "phase",
+    "eccentricity",
+    "shifts",
+}
+
+INTRINSIC_PARAMETERS_CS = {
+    "power",
+    "amplitude",
+    "f_high",
+}
+
+INTRINSIC_PARAMETERS_WNB = {
+    "frequency",
+    "bandwidth",
+    "eccentricity",
+    "phase",
+    "int_hdot_squared",
+    "duration",
+}
+
+INTRINSIC_PARAMETERS_GAUSSIAN = {
+    "hrss",
+    "polarization",
+    "eccentricity",
+    "duration",
+}
+
+EXTRINSIC_DEFAULTS = {
+    "psi",
+    "dec",
+    "ra",
+    "geocent_time"
+}
+
 #: defaults for any intrinsic parameter omitted from a batch
 INTRINSIC_DEFAULTS = {
     "a_1": 0.0,
@@ -60,14 +98,15 @@ INTRINSIC_DEFAULTS = {
 }
 
 
-def normalize_intrinsic_batch(params, n):
+def normalize_intrinsic_batch(params, n, intrinsic_params):
     """Broadcast a (possibly partial) intrinsic-parameter dict to length ``n``.
 
     Returns a new dict with every key in :data:`INTRINSIC_PARAMETERS` present as
     a float array of shape ``(n,)``.
     """
     out = {}
-    for key in INTRINSIC_PARAMETERS:
+    # Need to fix this
+    for key in intrinsic_params:
         if key in params:
             value = np.asarray(params[key], dtype=float)
             out[key] = np.broadcast_to(value, (n,)).astype(float, copy=False)
@@ -96,7 +135,12 @@ class WaveformBackend(ABC):
 
 __all__ = [
     "WaveformBackend",
-    "INTRINSIC_PARAMETERS",
+    "INTRINSIC_PARAMETERS_CBC",
+    "INTRINSIC_PARAMETERS_SG",
+    "INTRINSIC_PARAMETERS_WNB",
+    "INTRINSIC_PARAMETERS_CS",
+    "INTRINSIC_PARAMETERS_GAUSSIAN",
     "INTRINSIC_DEFAULTS",
     "normalize_intrinsic_batch",
+    "EXTRINSIC_DEFAULTS"
 ]
