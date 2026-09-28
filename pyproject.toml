@@ -44,6 +44,9 @@ sampling = ["pocomc>=0.2"]
 flows = ["pocomc>=1.2", "torch>=2.0"]
 lisa = ["lisaanalysistools>=1.2.8"]
 gpu = ["cupy-cuda12x>=13.0"]
+# AMPLFI-style adaptive HEALPix sky maps (hyperwave.skymap, method="healpix").
+# ligo.skymap itself isn't used: it needs matplotlib>=3.9, which conflicts with the pin above.
+skymap = ["healpy>=1.16"]
 # ml4gw requires python < 3.13; the marker keeps `pip install` working on 3.13.
 ml4gw = ["ml4gw>=0.7.12; python_version < '3.13'"]
 # ml4gw = [

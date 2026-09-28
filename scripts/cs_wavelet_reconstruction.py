@@ -29,6 +29,7 @@ import argparse
 import copy
 import os
 import time
+import torch
 
 import numpy as np
 
@@ -101,7 +102,9 @@ def build_problem(args):
                   parameters=CS_PARAMETER_NAMES,
                   static_parameters={"geocent_time": trigger_time},
                   waveform_backend='ml4gw')
-    injector.make_injections_to_ifo(theta)  # add the BBH to the data
+
+    torch.manual_seed(args.seed)
+    injector.make_injections_to_ifo(theta)  # add the WNB to the data
 
     f, asd0 = injector.detector_asd_masked(0)
     asd1 = injector.detector_asd_masked(1)[1]
@@ -110,6 +113,7 @@ def build_problem(args):
     df = f[1] - f[0]
 
     # pure injected signal (no data mutation) for the network optimal SNR
+    torch.manual_seed(args.seed)
     signal = injector.make_injections_to_ifo_batch(np.array([theta]))[0]
     inj_snr = network_optimal_snr(signal, psd, df)
 

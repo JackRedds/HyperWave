@@ -18,6 +18,12 @@ Why these signals (and not evidence):
 * Autocorrelation time tau on the cold-chain **log-likelihood** and **nleaves**
   is robust under trans-dimensional moves (both are well-defined scalars even as
   the parameter dimension changes), unlike per-parameter tau.
+* When the sky is sampled, the tau of the cold-chain **sky position** (the
+  three Cartesian components of the line-of-sight unit vector, so the
+  ``ra=0/2*pi`` wrap doesn't matter) is folded in as well. The likelihood and
+  nleaves can decorrelate in a few steps while the sky barely mixes -- e.g. a
+  cold chain whose sky only changes via tempering swaps from a small pool of
+  states -- which would otherwise pass as "converged" with spiky sky maps.
 * The **nleaves posterior** is the headline output, so a split-half
   total-variation test on p(D) directly certifies the result has converged and
   catches pathologies such as railing into ``nleaves_max``.
@@ -74,6 +80,10 @@ class WaveletConvergenceStopping(_ErynStopping):
         Branch whose leaf count is the model order (default ``"signal"``).
     nleaves_max:
         Upper bound on the leaf count (for the p(D) histogram).
+    sky_branch:
+        Branch holding ``[ra, dec, ...]`` in its first two columns (e.g.
+        ``"extrinsic"``). If given, the sky autocorrelation time also enters
+        ``tau`` (default ``None``: sky not checked).
     autocorr_mult:
         Require ``chain_length > autocorr_mult * tau`` (emcee rule, default 50).
     target_ess:
@@ -93,11 +103,12 @@ class WaveletConvergenceStopping(_ErynStopping):
         Print a diagnostics line at each check.
     """
 
-    def __init__(self, nleaves_branch="signal", nleaves_max=40, autocorr_mult=50,
+    def __init__(self, nleaves_branch="signal", nleaves_max=40, sky_branch=None, autocorr_mult=50,
                  target_ess=2000, tau_rtol=0.05, pd_tol=0.02, n_consecutive=2,
                  discard_frac=0.3, verbose=True):
         self.nleaves_branch = nleaves_branch
         self.nleaves_max = int(nleaves_max)
+        self.sky_branch = sky_branch
         self.autocorr_mult = float(autocorr_mult)
         self.target_ess = float(target_ess)
         self.tau_rtol = float(tau_rtol)
@@ -121,7 +132,8 @@ class WaveletConvergenceStopping(_ErynStopping):
 
         tau_l = _integrated_act(cold_logl)
         tau_n = _integrated_act(nleaves.astype(float))
-        taus = [t for t in (tau_l, tau_n) if np.isfinite(t)]
+        tau_s = self._sky_tau(sampler, discard)
+        taus = [t for t in (tau_l, tau_n, tau_s) if np.isfinite(t)]
         if not taus:
             return False
         tau = max(taus)
@@ -140,17 +152,32 @@ class WaveletConvergenceStopping(_ErynStopping):
                   and tau_stable and tv < self.pd_tol)
         self._consec = self._consec + 1 if passed else 0
 
-        self.last = dict(iteration=int(iteration), tau=float(tau), ess=float(ess),
+        self.last = dict(iteration=int(iteration), tau=float(tau), tau_logl=float(tau_l),
+                         tau_nleaves=float(tau_n), tau_sky=float(tau_s), ess=float(ess),
                          pD_tv=float(tv), tau_stable=bool(tau_stable),
                          consecutive=int(self._consec))
         if self.verbose:
-            print(f"[converge] it={iteration} tau={tau:.1f} "
+            sky = f" (sky {tau_s:.1f})" if self.sky_branch is not None else ""
+            print(f"[converge] it={iteration} tau={tau:.1f}{sky} "
                   f"ESS={ess:.0f}/{self.target_ess:.0f} "
                   f"n/tau={n_eff_steps/tau:.1f}/{self.autocorr_mult:.0f} "
                   f"pD_tv={tv:.3f}/{self.pd_tol} stable={tau_stable} "
                   f"pass={self._consec}/{self.n_consecutive}", flush=True)
 
         return self._consec >= self.n_consecutive
+
+    def _sky_tau(self, sampler, discard):
+        """Largest tau of the cold-chain line-of-sight unit-vector components."""
+        if self.sky_branch is None:
+            return np.nan
+        # a list, not a bare string: eryn's get_value mis-handles a str branch name
+        chain = sampler.get_chain(discard=discard, temp_index=0, branch_names=[self.sky_branch])
+        x = np.asarray(chain[self.sky_branch])[:, :, 0, :2]  # (n', nwalkers, [ra, dec])
+        ra, dec = x[..., 0].astype(float), x[..., 1].astype(float)
+        xyz = (np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec))
+        taus = [_integrated_act(v) for v in xyz]
+        taus = [t for t in taus if np.isfinite(t)]
+        return max(taus) if taus else np.nan
 
 
 __all__ = ["WaveletConvergenceStopping"]

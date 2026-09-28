@@ -45,10 +45,13 @@ from .ml4gw import ml4gw_available, torch_cuda_available
 from .result import Result
 from .skymap import (
     credible_area,
+    crossmatch_sky,
+    healpix_skymap,
     load_sky_samples,
     searched_area,
     searched_probability,
     sky_localization_summary,
+    thin_sky_samples,
 )
 from .utils import load_object, save_object
 from . import validation
@@ -65,6 +68,9 @@ __all__ = [
     "searched_probability",
     "credible_area",
     "sky_localization_summary",
+    "thin_sky_samples",
+    "healpix_skymap",
+    "crossmatch_sky",
     # inference (bilby priors retained here)
     "LVKinference",
     "InferenceRunner",

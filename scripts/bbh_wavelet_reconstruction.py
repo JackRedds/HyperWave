@@ -29,6 +29,7 @@ import argparse
 import copy
 import os
 import time
+import torch
 
 import numpy as np
 
@@ -104,7 +105,9 @@ def build_problem(args):
     injector = GW(noise, approximant="IMRPhenomPv2", reference_frequency=50.0,
                   parameters=BBH_PARAMETER_NAMES,
                   static_parameters={"geocent_time": trigger_time})
-    injector.make_injections_to_ifo(theta)  # add the BBH to the data
+
+    torch.manual_seed(args.seed)
+    injector.make_injections_to_ifo(theta)  # add the WNB to the data
 
     f, asd0 = injector.detector_asd_masked(0)
     asd1 = injector.detector_asd_masked(1)[1]
@@ -113,6 +116,7 @@ def build_problem(args):
     df = f[1] - f[0]
 
     # pure injected signal (no data mutation) for the network optimal SNR
+    torch.manual_seed(args.seed)
     signal = injector.make_injections_to_ifo_batch(np.array([theta]))[0]
     inj_snr = network_optimal_snr(signal, psd, df)
 
@@ -253,6 +257,9 @@ def main():
     p.add_argument("--rho-star", type=float, default=5.0,
                    help="peak of the per-wavelet induced-SNR prior (rho_*); raise "
                         "(e.g. 8-10) to allow higher per-wavelet SNR / more recovered power")
+    p.add_argument("--sky-step", type=float, default=0.01,
+                   help="std [rad] of the sky-only Gaussian move on ra/dec/psi "
+                        "(half that on ellipticity); was 0.1 inside a joint move")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--inj-ra", type=float, default=None, help="override injected RA [rad]")
     p.add_argument("--inj-dec", type=float, default=None, help="override injected Dec [rad]")
@@ -359,10 +366,17 @@ def main():
         ndims = {"signal": 5, "extrinsic": 4}
         nmax = {"signal": lmax, "extrinsic": 1}
         nmin = {"signal": 0, "extrinsic": 1}
-        moves = [(GaussianMove({
-            "signal": np.diag(np.array([0.05, 5.0, 1.0, 1.0, 0.3]) ** 2),
-            "extrinsic": np.diag(np.array([0.1, 0.1, 0.1, 0.05]) ** 2),
-        }), 1.0)]
+        # Separate (Gibbs) moves for the wavelets and the sky: a joint move has to
+        # get both right at once, and a sky jump of ~6 deg alone is rejected at
+        # these SNRs, so the cold chain almost never proposed a new sky position
+        # (in-model acceptance ~0.6%) -- its sky samples were a small pool of
+        # states swapped down from the hot chains, i.e. spiky sky maps.
+        moves = [
+            (GaussianMove({"signal": np.diag(np.array([0.05, 5.0, 1.0, 1.0, 0.3]) ** 2)},
+                          gibbs_sampling_setup="signal"), 0.5),
+            (GaussianMove({"extrinsic": np.diag((args.sky_step * np.array([1.0, 1.0, 1.0, 0.5])) ** 2)},
+                          gibbs_sampling_setup="extrinsic"), 0.5),
+        ]
 
         def log_like_fn(params, groups):
             return likelihood.grouped_log_like_sky(params, groups)
@@ -439,6 +453,7 @@ def main():
     if args.converge:
         stopper = WaveletConvergenceStopping(
             nleaves_branch="signal", nleaves_max=lmax,
+            sky_branch="extrinsic" if args.sample_sky else None,
             autocorr_mult=args.autocorr_mult, target_ess=args.target_ess,
             pd_tol=args.pd_tol, verbose=True,
         )
@@ -521,7 +536,7 @@ def main():
         else:
             rj_moves = DistributionGenerateRJ(gen, nleaves_max=nmax, nleaves_min=nmin)
         if args.proposal in ("fisher", "mffisher"):
-            moves = fisher_inmodel + [(m, 0.1) for (m, _w) in moves]
+            moves = fisher_inmodel + [(m, 0.1 * w) for (m, w) in moves]
     elif args.proposal == "fisherflow":
         # ISOLATION CONFIG: data-informed (guided) births exactly as in 'fisher',
         # plus an IN-MODEL flow independence move -- so any difference vs 'fisher'
@@ -539,7 +554,7 @@ def main():
             temperature_indices=(0,) if args.flow_train_temps == "cold" else None)
         update_kwargs = dict(update_fn=callback, update_iterations=args.flow_train_every)
         moves = ([(make_flow_distribution_move(flow_branch, gibbs_sampling_setup="signal"), 0.3)]
-                 + fisher_inmodel + [(m, 0.1) for (m, _w) in moves])
+                 + fisher_inmodel + [(m, 0.1 * w) for (m, w) in moves])
         print(f"[fisherflow] device={device} guided births + Fisher cascade + IN-MODEL flow "
               f"(w=0.3), train_every={args.flow_train_every}")
     elif args.proposal == "flowfisher":
@@ -557,7 +572,7 @@ def main():
             flow_branch, every=args.flow_train_every, verbose=True,
             temperature_indices=(0,) if args.flow_train_temps == "cold" else None)
         update_kwargs = dict(update_fn=callback, update_iterations=args.flow_train_every)
-        moves = fisher_inmodel + [(m, 0.1) for (m, _w) in moves]
+        moves = fisher_inmodel + [(m, 0.1 * w) for (m, w) in moves]
         print(f"[flowfisher] device={device} flow births + Fisher in-model, "
               f"train_every={args.flow_train_every}")
     elif args.proposal == "mlflow":
@@ -603,7 +618,7 @@ def main():
                 print(f"[mlflow] residual refresh skipped: {exc}")
         update_kwargs = dict(update_fn=_refresh_residual,
                              update_iterations=args.flow_train_every)
-        moves = fisher_inmodel + [(m, 0.1) for (m, _w) in moves]
+        moves = fisher_inmodel + [(m, 0.1 * w) for (m, w) in moves]
         print(f"[mlflow] device={device} pretrained flow={args.mlflow_ckpt}")
     elif args.proposal == "flow":
         device = "cuda" if (args.device == "gpu" and torch_cuda_available()) else "cpu"
