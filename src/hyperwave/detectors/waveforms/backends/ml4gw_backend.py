@@ -29,7 +29,7 @@ from .base import (WaveformBackend, normalize_intrinsic_batch, INTRINSIC_PARAMET
 
 from ..parameters import HyperwaveToCBC
 
-ML4GW_APPROXIMANTS = ("IMRPhenomD", "IMRPhenomPv2", "TaylorF2", "SineGaussian", "MultiSineGaussian", "WhiteNoiseBurst", "CosmicString", "Gaussian")
+ML4GW_APPROXIMANTS = ("IMRPhenomD", "IMRPhenomPv2", "TaylorF2", "SineGaussian", "MultiWaveform", "WhiteNoiseBurst", "CosmicString", "Gaussian")
 
 
 def _chirp_mass_mass_ratio(mass_1, mass_2):
@@ -74,7 +74,7 @@ class ML4GWWaveform(WaveformBackend):
             "IMRPhenomPv2": self._modules.IMRPhenomPv2,
             "TaylorF2": self._modules.TaylorF2,
             "SineGaussian": self._modules.SineGaussian,
-            "MultiSineGaussian": self._modules.MultiSineGaussian,
+            "MultiWaveform": self._modules.MultiWaveform,
             "WhiteNoiseBurst": self._modules.WhiteNoiseBurst,
             "CosmicString": self._modules.CosmicString,
             "Gaussian": self._modules.Gaussian
@@ -84,7 +84,7 @@ class ML4GWWaveform(WaveformBackend):
             "IMRPhenomPv2": INTRINSIC_PARAMETERS_CBC,
             "TaylorF2": INTRINSIC_PARAMETERS_CBC,
             "SineGaussian": INTRINSIC_PARAMETERS_SG,
-            "MultiSineGaussian": INTRINSIC_PARAMETERS_SG,
+            "MultiWaveform": INTRINSIC_PARAMETERS_SG,
             "WhiteNoiseBurst": INTRINSIC_PARAMETERS_WNB,
             "CosmicString": INTRINSIC_PARAMETERS_CS,
             "Gaussian": INTRINSIC_PARAMETERS_GAUSSIAN

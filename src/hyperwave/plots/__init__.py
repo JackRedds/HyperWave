@@ -9,6 +9,7 @@ from .corners import (
     plot_posterior,
 )
 from .hyper import Shape
+from .skymap import plot_skymap
 
 __all__ = [
     "plot_posterior",
@@ -20,4 +21,5 @@ __all__ = [
     "td_reconstruction",
     "fd_reconstruction",
     "wavelet_reconstruction",
+    "plot_skymap",
 ]

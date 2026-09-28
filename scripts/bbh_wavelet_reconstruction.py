@@ -262,6 +262,13 @@ def main():
     p.add_argument("--fixed-sky", dest="sample_sky", action="store_false",
                    help="hold the sky fixed at the injected values (fast single-branch path)")
     p.add_argument("--outfile", type=str, default=None)
+    p.add_argument("--backend-file", type=str, default=None,
+                   help="path to an HDF5 file for Eryn's disk-backed chain storage "
+                        "(HDFBackend) -- the default in-memory backend holds the full "
+                        "(nsteps, ntemps, nwalkers, nleaves_max, ndim) chain in RAM, "
+                        "which OOMs for long high-nleaves runs; pass this to stream the "
+                        "chain to disk instead. Any existing file at this path is "
+                        "overwritten (this script does not support resuming a run).")
     p.add_argument("--production-steps", type=int, default=5000,
                    help="reference production length for the timing projection")
     p.add_argument("--reference-hours", type=float, default=4.0,
@@ -626,6 +633,13 @@ def main():
     if args.proposal in ("fisher", "flowfisher"):
         temp_kwargs.update(Tmax=np.inf, adaptive=True)
 
+    backend = None
+    if args.backend_file:
+        if os.path.exists(args.backend_file):
+            os.remove(args.backend_file)  # this script always starts a fresh run
+        backend = args.backend_file
+        print(f"[backend] disk-backed chain storage (HDFBackend) -> {backend}")
+
     sampler = EnsembleSampler(
         nw, ndims, log_like_fn, priors,
         tempering_kwargs=temp_kwargs,
@@ -635,6 +649,7 @@ def main():
         moves=moves, rj_moves=rj_moves,
         fill_zero_leaves_val=likelihood.empty_log_likelihood,
         periodic=spec["periodic"],
+        backend=backend,
         **update_kwargs,
         **stop_kwargs,
     )

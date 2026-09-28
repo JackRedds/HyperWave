@@ -43,6 +43,13 @@ from .likelihoods import (
 )
 from .ml4gw import ml4gw_available, torch_cuda_available
 from .result import Result
+from .skymap import (
+    credible_area,
+    load_sky_samples,
+    searched_area,
+    searched_probability,
+    sky_localization_summary,
+)
 from .utils import load_object, save_object
 from . import validation
 
@@ -52,6 +59,12 @@ __all__ = [
     "load_object",
     "save_object",
     "Result",
+    # sky localization
+    "load_sky_samples",
+    "searched_area",
+    "searched_probability",
+    "credible_area",
+    "sky_localization_summary",
     # inference (bilby priors retained here)
     "LVKinference",
     "InferenceRunner",
