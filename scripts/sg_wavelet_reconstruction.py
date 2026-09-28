@@ -62,32 +62,31 @@ from hyperwave.likelihoods import WaveletLikelihood  # noqa: E402
 from hyperwave.ml4gw import torch_cuda_available  # noqa: E402
 from hyperwave.plots import wavelet_reconstruction as wr  # noqa: E402
 
-WNB_PARAMETER_NAMES = [
-    "frequency", "bandwidth", "eccentricity", "phase", "int_hdot_squared",
-    "psi", "ra", "dec", "duration",
+SG_PARAMETER_NAMES = [
+    "quality", "frequency", "hrss", "phase", "eccentricity", "shifts", "psi",
+    "ra", "dec",
 ]
 
 
 RA_INJ, DEC_INJ, PSI_INJ = 1.375, -0.2108, 1.1
 
 
-def make_wnb(seed):
-    freq = 500.0
-    bandwidth = 250.0
+def make_sg(seed):
+    hrss = 4.2e-22
+    quality = 20.0
+    frequency = 100.0
     eccentricity = 0.0
     phase = 0.0
-    int_hdot = 1.7e-37
-    duration = 0.05
+    shifts = 0.0
     params = dict(
-        frequency=freq, bandwidth=bandwidth, eccentricity=eccentricity, 
-        phase=phase, int_hdot_squared=int_hdot, duration=duration, 
-        psi=PSI_INJ, ra=RA_INJ, dec=DEC_INJ, 
+        hrss=hrss, quality=quality, frequency=frequency, eccentricity=eccentricity,
+        phase=phase, shifts=shifts, psi=PSI_INJ,
+        ra=RA_INJ, dec=DEC_INJ,
     )
-    theta = [params[k] for k in WNB_PARAMETER_NAMES]
+    theta = [params[k] for k in SG_PARAMETER_NAMES]
     # CBC cross-polarisation convention (lalsimulation): h_cross = -eps * i * h_plus,
     # with eps = 2 cos(iota) / (1 + cos^2 iota). The sign matters for the fixed-sky
     # path; when the sky is sampled, ellipticity is free over [-1, 1].
-    # ellipticity = -2.0 * cos_iota / (1.0 + cos_iota**2)
     ellipticity = 0.0
     return params, theta, ellipticity
 
@@ -101,18 +100,12 @@ def build_problem(args):
                           minimum_frequency=fmin, maximum_frequency=fmax)
     noise.generate_noise(real_noise=False, seed=args.seed)
 
-    params, theta, ellipticity = make_wnb(args.seed)
-    injector = GW(noise, approximant="WhiteNoiseBurst", reference_frequency=50.0,
-                  parameters=WNB_PARAMETER_NAMES,
-                  static_parameters={"geocent_time": trigger_time}, 
+    params, theta, ellipticity = make_sg(args.seed)
+    injector = GW(noise, approximant="SineGaussian", reference_frequency=50.0,
+                  parameters=SG_PARAMETER_NAMES,
+                  static_parameters={"geocent_time": trigger_time},
                   waveform_backend='ml4gw')
-    # ml4gw's WhiteNoiseBurst draws its noise with an unseeded torch.randn, so seed
-    # torch before every WNB generation: this makes the injection reproducible
-    # (the CPU gpu-check twin must see the SAME data) and makes the "pure signal"
-    # regenerated below identical to the one actually injected.
-    import torch
-    torch.manual_seed(args.seed)
-    injector.make_injections_to_ifo(theta)  # add the WNB to the data
+    injector.make_injections_to_ifo(theta)  # add the BBH to the data
 
     f, asd0 = injector.detector_asd_masked(0)
     asd1 = injector.detector_asd_masked(1)[1]
@@ -121,7 +114,6 @@ def build_problem(args):
     df = f[1] - f[0]
 
     # pure injected signal (no data mutation) for the network optimal SNR
-    torch.manual_seed(args.seed)
     signal = injector.make_injections_to_ifo_batch(np.array([theta]))[0]
     inj_snr = network_optimal_snr(signal, psd, df)
 
@@ -271,13 +263,6 @@ def main():
     p.add_argument("--fixed-sky", dest="sample_sky", action="store_false",
                    help="hold the sky fixed at the injected values (fast single-branch path)")
     p.add_argument("--outfile", type=str, default=None)
-    p.add_argument("--backend-file", type=str, default=None,
-                   help="path to an HDF5 file for Eryn's disk-backed chain storage "
-                        "(HDFBackend) -- the default in-memory backend holds the full "
-                        "(nsteps, ntemps, nwalkers, nleaves_max, ndim) chain in RAM, "
-                        "which OOMs for long high-nleaves runs; pass this to stream the "
-                        "chain to disk instead. Any existing file at this path is "
-                        "overwritten (this script does not support resuming a run).")
     p.add_argument("--production-steps", type=int, default=5000,
                    help="reference production length for the timing projection")
     p.add_argument("--reference-hours", type=float, default=4.0,
@@ -642,13 +627,6 @@ def main():
     if args.proposal in ("fisher", "flowfisher"):
         temp_kwargs.update(Tmax=np.inf, adaptive=True)
 
-    backend = None
-    if args.backend_file:
-        if os.path.exists(args.backend_file):
-            os.remove(args.backend_file)  # this script always starts a fresh run
-        backend = args.backend_file
-        print(f"[backend] disk-backed chain storage (HDFBackend) -> {backend}")
-
     sampler = EnsembleSampler(
         nw, ndims, log_like_fn, priors,
         tempering_kwargs=temp_kwargs,
@@ -658,7 +636,6 @@ def main():
         moves=moves, rj_moves=rj_moves,
         fill_zero_leaves_val=likelihood.empty_log_likelihood,
         periodic=spec["periodic"],
-        backend=backend,
         **update_kwargs,
         **stop_kwargs,
     )
