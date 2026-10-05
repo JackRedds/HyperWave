@@ -132,7 +132,7 @@ def build_problem(args):
 
 
 def reconstruction_summary(sampler, template, true_signal, psd, *, sample_sky,
-                           fixed_sky=None, n_draws=800, discard_frac=0.3, chunk=200, seed=0,
+                           data=None, fixed_sky=None, n_draws=800, discard_frac=0.3, chunk=200, seed=0,
                            time_domain=True):
     """Compare the posterior wavelet reconstruction with the injected signal.
 
@@ -164,6 +164,23 @@ def reconstruction_summary(sampler, template, true_signal, psd, *, sample_sky,
     overlap = np.where(good, tr / np.sqrt(np.where(good, rr, 1.0) * tt), 0.0)
     rec_snr = np.sqrt(rr)
 
+    # Residual chi^2 per degree of freedom, <d-h|d-h> / dof per draw. Each complex
+    # bin carries 2 real dof (pure noise -> 1 +- sqrt(2/dof)); the network value
+    # also subtracts the draw's parameter count (5 per active wavelet, + 4 sky).
+    # chi2_dof_noise is the same statistic for d - h_inj (the noise realisation).
+    chi2 = {}
+    if data is not None:
+        data = np.asarray(data)
+        nbin = (np.isfinite(inv[0]) & (inv[0] > 0)).sum(axis=-1)            # (n_ifo,)
+        resid = data[None] - hrec
+        c_ifo = 4 * df * np.sum((resid.conj() * resid * inv).real, axis=2)  # (D, n_ifo)
+        ndof = 2 * nbin.sum() - (5 * msk.sum(axis=1) + (4 if sample_sky else 0))
+        noise = data - true_signal
+        c_noise = 4 * df * np.sum((noise.conj() * noise * inv[0]).real)
+        chi2 = dict(chi2_dof=(c_ifo.sum(axis=1) / ndof)[good], chi2_ndof=ndof[good],
+                    chi2_dof_ifo=(c_ifo / (2 * nbin))[good],
+                    chi2_dof_noise=float(c_noise / (2 * nbin.sum())))
+
     # Frequency-domain amplitude summary: percentiles of |h(f)| (consistent
     # median/band; see hyperwave.plots.wavelet_reconstruction for why).
     amp = np.abs(hrec)
@@ -174,6 +191,8 @@ def reconstruction_summary(sampler, template, true_signal, psd, *, sample_sky,
 
     # Whitened time-domain reconstruction (real strain -> pointwise percentiles).
     # The time grid is derived from the template's own frequency array.
+    out.update(chi2)
+
     if time_domain:
         asd = np.sqrt(psd)
         _, h_t = wr.whiten_to_td(hrec, template.frequency_array, template.mask, asd=asd)
@@ -714,7 +733,7 @@ def main():
         info = stopper.last if stopper else {}
         print(f"stopping             : {status} at {sampled_steps} sampling steps "
               f"(tau={info.get('tau', float('nan')):.1f}, ESS={info.get('ess', float('nan')):.0f}, "
-              f"pD_tv={info.get('pD_tv', float('nan')):.3f})")
+              f"pD_tv={info.get('pD_tv', float('nan')):.3f}, Rhat={info.get('rhat', float('nan')):.3f})")
     print(f"this run wall-clock  : {sample_t:.1f} s ({sample_t/60:.1f} min) for {total_steps} "
           f"ensemble steps (burn {burn} + {sampled_steps}), {n_walkers_total} walkers/step")
     print(f"per step             : {per_step*1e3:.1f} ms "
@@ -731,7 +750,7 @@ def main():
     # signal-level comparison: overlap (match) and recovered SNR vs the injection
     fixed_sky = None if args.sample_sky else (ra, dec, psi, ellipticity)
     summ = reconstruction_summary(sampler, template, true_signal, psd,
-                                  sample_sky=args.sample_sky, fixed_sky=fixed_sky,
+                                  data=data_noisy, sample_sky=args.sample_sky, fixed_sky=fixed_sky,
                                   n_draws=args.draws, seed=args.seed)
     ov, rs = summ["overlap"], summ["rec_snr"]
     q = lambda a: (np.percentile(a, 5), np.median(a), np.percentile(a, 95))
@@ -741,6 +760,10 @@ def main():
     print(f"network overlap (match): median {o50:.3f}  90%CI [{o5:.3f}, {o95:.3f}]")
     print(f"recovered network SNR  : median {s50:.1f}   90%CI [{s5:.1f}, {s95:.1f}]   "
           f"(injected {inj_snr:.1f})")
+    if "chi2_dof" in summ:
+        c5, c50, c95 = q(summ["chi2_dof"])
+        print(f"residual chi2/dof      : median {c50:.3f}  90%CI [{c5:.3f}, {c95:.3f}]   "
+              f"(noise only {summ['chi2_dof_noise']:.3f}, dof {int(np.median(summ['chi2_ndof']))})")
 
     if args.recon_plot:
         # per-detector FD + whitened-TD plots from the shared
@@ -770,6 +793,7 @@ def main():
                  device=template.backend_name, overlap=ov, rec_snr=rs,
                  recon_median=summ["median"], recon_band_lo=summ["band_lo"],
                  recon_band_hi=summ["band_hi"], freqs=freqs, true_signal=true_signal,
+                 **{k: v for k, v in summ.items() if k.startswith("chi2")},
                  **td, **({} if not stopper else stopper.last))
         print(f"\nsaved -> {args.outfile}")
 

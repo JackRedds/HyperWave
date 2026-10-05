@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --nodes=1
-#SBATCH --job-name=cs_reconstruction
+#SBATCH --job-name=wnb_reconstruction
 #SBATCH --account=bcse-delta-gpu
 #SBATCH --output=/scratch/bcse/jredepenning/hyperwave_outdir/%x.out
 #SBATCH --error=/scratch/bcse/jredepenning/hyperwave_outdir/%x.err
