@@ -340,6 +340,8 @@ try:
 except ImportError as exc:  # pragma: no cover - eryn is a core dependency
     raise ImportError("Wavelet moves require Eryn (eryn.moves).") from exc
 
+from ..detectors.geometry import get_detector, greenwich_mean_sidereal_time
+
 
 def _wavelet_fisher_sigma(p, snr_floor):
     """Analytic per-parameter sine-Gaussian Fisher widths for ``[t0,f0,Q,snr,phi]``.
@@ -446,63 +448,156 @@ def _rotate_about_axis(k, axis, omega):
     return k * c + cross * s + axis[:, None] * axdotk * (1.0 - c)
 
 
-class WaveletSkyRingMove(MHMove):
-    """Sky-ring proposal: rotate (ra, dec) about the detector baseline (BayesWave).
+def _sky_to_k(ra, dec, gmst):
+    """Earth-fixed unit vector towards ``(ra, dec)``, shape ``(3, n)``."""
+    cosd = np.cos(dec)
+    return np.array([np.cos(ra - gmst) * cosd, np.sin(ra - gmst) * cosd, np.sin(dec)])
 
-    Rotates the line-of-sight vector by a random angle about the axis joining two
-    detectors, moving along the constant-time-delay ring where the likelihood is
-    nearly degenerate. A rigid sphere rotation is symmetric in the sphere measure
-    ``d(ra) d(sin dec)``; since HyperWave samples ``dec`` (with a ``CosinePrior``),
-    the MH factor ``log cos(dec_x) - log cos(dec_y)`` cancels that prior's
-    Jacobian so the net move is the intended sphere-uniform jump. Operates on the
-    ``extrinsic`` branch ``[ra, dec, psi, ellipticity]``.
+
+def _k_to_sky(k, gmst):
+    dec = np.arcsin(np.clip(k[2], -1.0, 1.0))
+    ra = np.mod(np.arctan2(k[1], k[0]) + gmst, 2.0 * np.pi)
+    return ra, dec
+
+
+def sky_ring_polarization_map(detectors, reference_time, axis, gmst, ra, dec, psi,
+                              ellipticity, omega, branch, det_tol=1e-6):
+    """Deterministic core of :class:`WaveletSkyRingMove` (vectorised over ``n``).
+
+    Rotates the sky by ``omega`` about the two-detector ``axis`` and solves for the
+    ``(psi', ellipticity')`` and complex wavelet factor ``c`` that leave the signal
+    in both detectors unchanged. With ``z = F+(psi=0) + i Fx(psi=0)`` the
+    elliptical response is ``r = A z + B conj(z)`` with ``A = (1+e)/2 e^{-2i psi}``,
+    ``B = (1-e)/2 e^{2i psi}``, so matching the old two-detector response ``v``
+    at the new sky is the 2x2 complex linear solve ``Z' (p, s) = v``; then
+    ``gamma' = s/p = (1-e')/(1+e') e^{4i psi'}`` and ``c = p / A'``.
+    ``psi'`` is defined mod ``pi/2`` (the ``pi/2`` flip is absorbed into ``c``);
+    ``branch`` in ``{0, 1}`` picks ``psi' = psi_0 + branch * pi/2``.
+
+    Returns ``(ra', dec', psi', ellipticity', c, delta_t, log_jac_extrinsic, ok)``:
+    wavelets map as ``amplitude *= |c|``, ``phi0 += arg c``, ``t0 -= delta_t``
+    (``delta_t`` is the common change in geocentre-to-detector delay), and
+    ``log_jac_extrinsic`` is ``log|d(ra',dec',psi',e')/d(ra,dec,psi,e)|``. ``ok`` is
+    False where either sky is (numerically) polarisation-degenerate for the pair.
+    """
+    det_a, det_b = detectors
+    ra2, dec2 = _k_to_sky(_rotate_about_axis(_sky_to_k(ra, dec, gmst), axis, omega), gmst)
+
+    def z_of(det, r, d):
+        fp, fc = det.antenna_response(r, d, 0.0, reference_time)
+        return fp + 1j * fc
+
+    za, zb = z_of(det_a, ra, dec), z_of(det_b, ra, dec)
+    za2, zb2 = z_of(det_a, ra2, dec2), z_of(det_b, ra2, dec2)
+    det_z = za * np.conj(zb) - np.conj(za) * zb
+    det_z2 = za2 * np.conj(zb2) - np.conj(za2) * zb2
+    ok = ((np.abs(det_z) > det_tol * np.abs(za) * np.abs(zb))
+          & (np.abs(det_z2) > det_tol * np.abs(za2) * np.abs(zb2)))
+    det_z2 = np.where(ok, det_z2, 1.0)
+
+    alpha, beta = 0.5 * (1.0 + ellipticity), 0.5 * (1.0 - ellipticity)
+    A, B = alpha * np.exp(-2j * psi), beta * np.exp(2j * psi)
+    va = A * za + B * np.conj(za)
+    vb = A * zb + B * np.conj(zb)
+    p = (va * np.conj(zb2) - np.conj(za2) * vb) / det_z2
+    s = (za2 * vb - zb2 * va) / det_z2
+    ok &= np.abs(p) > 0.0
+    p = np.where(ok, p, 1.0)
+
+    gamma2 = s / p
+    rho2 = np.abs(gamma2)
+    ell2 = (1.0 - rho2) / (1.0 + rho2)
+    psi2 = np.mod(np.angle(gamma2) / 4.0, 0.5 * np.pi) + 0.5 * np.pi * branch
+    alpha2, beta2 = 0.5 * (1.0 + ell2), 0.5 * (1.0 - ell2)
+    c = p / (alpha2 * np.exp(-2j * psi2))
+
+    delta_t = (det_a.time_delay_from_geocenter(ra2, dec2, reference_time)
+               - det_a.time_delay_from_geocenter(ra, dec, reference_time))
+
+    # gamma -> gamma' is Moebius with derivative det(M) (A/p)^2, M = Z'^-1 Z, and
+    # |d gamma / d(psi, e)| = 2 beta / alpha^3; the sky rotation is area-preserving
+    # in (ra, sin dec), i.e. cos(dec)/cos(dec') in (ra, dec).
+    tiny = 1e-300
+    log_jac = (2.0 * np.log(np.abs(det_z) / np.abs(det_z2) + tiny)
+               + np.log(alpha + tiny) + np.log(beta + tiny) - 4.0 * np.log(np.abs(p) + tiny)
+               + 3.0 * np.log(alpha2 + tiny) - np.log(beta2 + tiny)
+               + np.log(np.clip(np.cos(dec), 1e-12, None))
+               - np.log(np.clip(np.cos(dec2), 1e-12, None)))
+    return ra2, dec2, psi2, ell2, c, delta_t, log_jac, ok
+
+
+class WaveletSkyRingMove(MHMove):
+    """Sky-ring proposal that carries the polarisation and wavelets along (BayesWave).
+
+    Rotates the line of sight by a uniform random angle about the axis joining the
+    first two detectors (preserving their arrival-time difference), then maps
+    ``(psi, ellipticity)`` and every active wavelet's ``(amplitude, phi0, t0)`` so
+    that the projected signal in both detectors is unchanged (see
+    :func:`sky_ring_polarization_map`). Rotating ra/dec alone changes the
+    two-detector response ratio, which costs ``~SNR^2`` in log-likelihood, so such
+    a jump is almost never accepted at high SNR; with the polarisation carried
+    along the likelihood is (up to the small ``f + f0`` wavelet lobe) unchanged and
+    the walk along the ring is governed by the prior.
+
+    The map is a deterministic bijection given ``omega`` (uniform, symmetric) and
+    a fair ``psi`` branch bit, so the Hastings factor is its log-Jacobian:
+    extrinsic part plus ``n_active * log|c|`` from the amplitude rescaling.
+    Operates on the ``extrinsic`` branch ``[ra, dec, psi, ellipticity]`` and the
+    wavelet branch ``[t0, f0, Q, amplitude, phi0]`` -- both must be proposed
+    together (no Gibbs split between them).
     """
 
-    _DET_INDEX = {
-        "H1": "LALDetectorIndexLHODIFF", "L1": "LALDetectorIndexLLODIFF",
-        "V1": "LALDetectorIndexVIRGODIFF", "K1": "LALDetectorIndexKAGRADIFF",
-        "G1": "LALDetectorIndexGEO600DIFF",
-    }
-
-    def __init__(self, detector_names, reference_time, branch_name="extrinsic", **kwargs):
-        import lal
-        locs = [np.asarray(lal.CachedDetectors[getattr(lal, self._DET_INDEX[d])].location,
-                           dtype=float) for d in detector_names[:2]]
-        axis = locs[0] - locs[1]
+    def __init__(self, detector_names, reference_time, branch_name="extrinsic",
+                 signal_branch="signal", **kwargs):
+        self.detectors = [get_detector(str(d)) for d in detector_names[:2]]
+        axis = self.detectors[0].vertex - self.detectors[1].vertex
         self.axis = axis / np.linalg.norm(axis)
-        gmst = float(lal.GreenwichMeanSiderealTime(lal.LIGOTimeGPS(float(reference_time))))
-        self.gmst = gmst % (2.0 * np.pi)
+        self.reference_time = float(reference_time)
+        self.gmst = float(greenwich_mean_sidereal_time(self.reference_time)) % (2.0 * np.pi)
         self.branch_name = branch_name
+        self.signal_branch = signal_branch
         super().__init__(**kwargs)
 
     def get_proposal(self, branches_coords, random, branches_inds=None, **kwargs):
-        name = self.branch_name
-        coords = branches_coords[name]
-        ntemps, nwalkers, nleaves_max, ndim = coords.shape
-        inds = (np.ones((ntemps, nwalkers, nleaves_max), dtype=bool)
-                if branches_inds is None else branches_inds[name])
+        name, sig = self.branch_name, self.signal_branch
+        if sig not in branches_coords:
+            raise KeyError(f"WaveletSkyRingMove needs the {sig!r} branch proposed with "
+                           f"{name!r}; do not Gibbs-split them.")
+        ext = branches_coords[name]
+        ntemps, nwalkers, nleaves_ext, _ = ext.shape
+        if nleaves_ext != 1:
+            raise ValueError("WaveletSkyRingMove expects a single extrinsic leaf.")
         q = {n: c.copy() for n, c in branches_coords.items()}
-        factors = np.zeros((ntemps, nwalkers))
 
-        ti, wi, li = np.where(inds)
-        if ti.size:
-            x = coords[ti, wi, li]                                   # (n, 4) [ra,dec,psi,ellip]
-            ra, dec = x[:, 0], x[:, 1]
-            cosd = np.cos(dec)
-            k = np.array([np.cos(self.gmst - ra) * cosd,
-                          -np.sin(self.gmst - ra) * cosd,
-                          np.sin(dec)])                              # (3, n)
-            omega = 2.0 * np.pi * random.uniform(size=ti.size)
-            kp = _rotate_about_axis(k, self.axis, omega)
-            new_dec = np.arcsin(np.clip(kp[2], -1.0, 1.0))
-            new_ra = np.mod(np.arctan2(kp[1], kp[0]) + self.gmst, 2.0 * np.pi)
-            y = x.copy()
-            y[:, 0], y[:, 1] = new_ra, new_dec
-            leaf_fac = (np.log(np.clip(cosd, 1e-12, None))
-                        - np.log(np.clip(np.cos(new_dec), 1e-12, None)))
-            q[name][ti, wi, li] = y
-            np.add.at(factors, (ti, wi), leaf_fac)
-        return q, factors
+        x = ext[:, :, 0, :].reshape(-1, 4)
+        n = x.shape[0]
+        omega = 2.0 * np.pi * random.uniform(size=n)
+        branch = (random.uniform(size=n) < 0.5).astype(float)
+        ra2, dec2, psi2, ell2, c, delta_t, log_jac, ok = sky_ring_polarization_map(
+            self.detectors, self.reference_time, self.axis, self.gmst,
+            x[:, 0], x[:, 1], x[:, 2], x[:, 3], omega, branch)
+
+        y = x.copy()
+        y[ok] = np.stack([ra2, dec2, psi2, ell2], axis=-1)[ok]
+        q[name][:, :, 0, :] = y.reshape(ntemps, nwalkers, 4)
+
+        if branches_inds is None or sig not in branches_inds:
+            active = np.ones(branches_coords[sig].shape[:3], dtype=bool)
+        else:
+            active = branches_inds[sig]
+        shape = (ntemps, nwalkers, 1)
+        amp_fac = np.where(ok, np.abs(c), 1.0).reshape(shape)
+        dphi = np.where(ok, np.angle(c), 0.0).reshape(shape)
+        dt0 = np.where(ok, delta_t, 0.0).reshape(shape)
+        w = q[sig]
+        w[..., 0] = np.where(active, w[..., 0] - dt0, w[..., 0])
+        w[..., 3] = np.where(active, w[..., 3] * amp_fac, w[..., 3])
+        w[..., 4] = np.where(active, np.mod(w[..., 4] + dphi, 2.0 * np.pi), w[..., 4])
+
+        n_active = active.sum(axis=-1).reshape(-1)
+        factors = log_jac + n_active * np.log(np.where(ok, np.abs(c), 1.0))
+        factors = np.where(ok, factors, -np.inf)
+        return q, factors.reshape(ntemps, nwalkers)
 
 
 class WaveletGroupStretchMove(GroupStretchMove):
@@ -551,4 +646,4 @@ class WaveletGroupStretchMove(GroupStretchMove):
 __all__ = ["DataInformedMarginal", "build_guided_birth", "build_flow_proposal",
            "guided_initial_wavelets", "WaveletFisherMove", "WaveletHalfCycleMove",
            "WaveletGroupStretchMove",
-           "WaveletSkyRingMove"]
+           "WaveletSkyRingMove", "sky_ring_polarization_map"]
