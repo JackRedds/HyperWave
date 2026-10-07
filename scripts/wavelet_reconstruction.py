@@ -27,6 +27,13 @@ Run::
 
     python scripts/wavelet_reconstruction.py --waveform bbh --device gpu --nsteps 2000
     python scripts/wavelet_reconstruction.py --waveform wnb --device cpu --nsteps 500
+    # change the injected signal (any family parameter; repeatable)
+    python scripts/wavelet_reconstruction.py --waveform bbh \\
+        --inj-param luminosity_distance=400 --inj-param mass_1=50 --inj-param mass_2=40
+    # rescale the injection to a target network SNR
+    python scripts/wavelet_reconstruction.py --waveform cs --inj-snr 20
+
+To run a grid of injected values, use ``scripts/wavelet_param_sweep.py``.
 
 By default the sky (ra, dec, psi, ellipticity) is sampled alongside the
 wavelets; ``--fixed-sky`` holds it at the injected values (fast single-branch path).
@@ -127,27 +134,80 @@ def make_wnb():
 
 # Injected waveform families: approximant, waveform backend (None = GW's default,
 # LAL), the parameter order the injector expects, and the injection builder.
+# ``amplitude`` is the parameter --inj-snr rescales; the network SNR scales as
+# amplitude**snr_power.
 WAVEFORMS = {
     "bbh": dict(
         approximant="IMRPhenomPv2", waveform_backend=None, make=make_bbh,
+        amplitude="luminosity_distance", snr_power=-1.0,
         parameters=["chirp_mass", "mass_ratio", "luminosity_distance", "psi", "phase",
                     "ra", "dec", "chi_1", "chi_2", "cos_theta_jn", "cos_tilt_1",
                     "cos_tilt_2", "phi_12", "phi_jl"]),
     "sg": dict(
         approximant="SineGaussian", waveform_backend="ml4gw", make=make_sg,
+        amplitude="hrss", snr_power=1.0,
         parameters=["quality", "frequency", "hrss", "phase", "eccentricity", "shifts",
                     "psi", "ra", "dec"]),
     "cs": dict(
         approximant="CosmicString", waveform_backend="ml4gw", make=make_cs,
+        amplitude="amplitude", snr_power=1.0,
         parameters=["power", "amplitude", "f_high", "psi", "ra", "dec"]),
     "gaussian": dict(
         approximant="Gaussian", waveform_backend="ml4gw", make=make_gaussian,
+        amplitude="hrss", snr_power=1.0,
         parameters=["hrss", "polarization", "eccentricity", "duration", "psi", "ra", "dec"]),
     "wnb": dict(
         approximant="WhiteNoiseBurst", waveform_backend="ml4gw", make=make_wnb,
+        amplitude="int_hdot_squared", snr_power=0.5,
         parameters=["frequency", "bandwidth", "eccentricity", "phase", "int_hdot_squared",
                     "psi", "ra", "dec", "duration"]),
 }
+
+
+def parse_param_overrides(items, waveform):
+    """``["key=value", ...]`` -> ``{key: float}``, validated against ``waveform``.
+
+    Accepts any parameter the family's injector takes; for ``bbh`` also
+    ``mass_1``/``mass_2`` (source-frame component masses, converted to
+    chirp_mass/mass_ratio). Raises ``ValueError`` on a malformed or unknown key.
+    """
+    allowed = set(WAVEFORMS[waveform]["parameters"])
+    if waveform == "bbh":
+        allowed |= {"mass_1", "mass_2"}
+    out = {}
+    for item in items or []:
+        key, sep, val = item.partition("=")
+        key = key.strip()
+        if not sep:
+            raise ValueError(f"--inj-param expects KEY=VALUE, got {item!r}")
+        if key not in allowed:
+            raise ValueError(f"unknown {waveform} parameter {key!r}; "
+                             f"choose from {sorted(allowed)}")
+        out[key] = float(val)
+    return out
+
+
+def injection_parameters(waveform, overrides):
+    """The family's default injection with ``overrides`` applied.
+
+    Returns ``(params, ellipticity)``; for ``bbh`` the ellipticity is recomputed
+    from the (possibly overridden) ``cos_theta_jn``.
+    """
+    params, ellipticity = WAVEFORMS[waveform]["make"]()
+    overrides = dict(overrides)
+    if waveform == "bbh" and ({"mass_1", "mass_2"} & set(overrides)):
+        if {"chirp_mass", "mass_ratio"} & set(overrides):
+            raise ValueError("give either mass_1/mass_2 or chirp_mass/mass_ratio, not both")
+        m1 = overrides.pop("mass_1", 36.0)
+        m2 = overrides.pop("mass_2", 29.0)
+        m1, m2 = max(m1, m2), min(m1, m2)
+        params["chirp_mass"] = (m1 * m2) ** 0.6 / (m1 + m2) ** 0.2
+        params["mass_ratio"] = m2 / m1
+    params.update(overrides)
+    if waveform == "bbh":
+        c = params["cos_theta_jn"]
+        ellipticity = -2.0 * c / (1.0 + c**2)
+    return params, ellipticity
 
 
 def build_problem(args):
@@ -160,7 +220,7 @@ def build_problem(args):
     noise.generate_noise(real_noise=False, seed=args.seed)
 
     fam = WAVEFORMS[args.waveform]
-    params, ellipticity = fam["make"]()
+    params, ellipticity = injection_parameters(args.waveform, args.inj_overrides)
     theta = [params[k] for k in fam["parameters"]]
     kw = {} if fam["waveform_backend"] is None else {"waveform_backend": fam["waveform_backend"]}
     injector = GW(noise, approximant=fam["approximant"], reference_frequency=50.0,
@@ -177,14 +237,23 @@ def build_problem(args):
             import torch
             torch.manual_seed(args.seed)
 
-    seed_torch()
-    injector.make_injections_to_ifo(theta)  # add the signal to the data
-
     f, asd0 = injector.detector_asd_masked(0)
     asd1 = injector.detector_asd_masked(1)[1]
     psd = np.array([asd0**2, asd1**2])
-    data = np.array([injector.detector_data_fd(0), injector.detector_data_fd(1)])
     df = f[1] - f[0]
+
+    # --inj-snr: rescale the family's amplitude parameter so the network optimal
+    # SNR hits the target (the SNR is noise-independent, so do it before injecting).
+    if args.inj_snr is not None:
+        seed_torch()
+        snr0 = network_optimal_snr(injector.make_injections_to_ifo_batch(np.array([theta]))[0],
+                                   psd, df)
+        params[fam["amplitude"]] *= (args.inj_snr / snr0) ** (1.0 / fam["snr_power"])
+        theta = [params[k] for k in fam["parameters"]]
+
+    seed_torch()
+    injector.make_injections_to_ifo(theta)  # add the signal to the data
+    data = np.array([injector.detector_data_fd(0), injector.detector_data_fd(1)])
 
     # pure injected signal (no data mutation) for the network optimal SNR
     seed_torch()
@@ -356,6 +425,15 @@ def main():
     p.add_argument("--inj-ra", type=float, default=None, help="override injected RA [rad]")
     p.add_argument("--inj-dec", type=float, default=None, help="override injected Dec [rad]")
     p.add_argument("--inj-psi", type=float, default=None, help="override injected psi [rad]")
+    p.add_argument("--inj-param", action="append", default=[], metavar="KEY=VALUE",
+                   help="override any injected parameter of --waveform (repeatable), e.g. "
+                        "--inj-param luminosity_distance=400 --inj-param mass_1=50 "
+                        "(bbh also accepts mass_1/mass_2). See "
+                        "scripts/wavelet_param_sweep.py to run a grid of values.")
+    p.add_argument("--inj-snr", type=float, default=None,
+                   help="rescale the injection to this network optimal SNR (via the "
+                        "family's amplitude: bbh luminosity_distance, sg/gaussian hrss, "
+                        "cs amplitude, wnb int_hdot_squared)")
     p.add_argument("--sample-sky", dest="sample_sky", action="store_true", default=True,
                    help="sample sky position ra/dec/psi/ellipticity (default)")
     p.add_argument("--fixed-sky", dest="sample_sky", action="store_false",
@@ -434,6 +512,18 @@ def main():
     if args.inj_ra is not None: RA_INJ = args.inj_ra
     if args.inj_dec is not None: DEC_INJ = args.inj_dec
     if args.inj_psi is not None: PSI_INJ = args.inj_psi
+    try:
+        args.inj_overrides = parse_param_overrides(args.inj_param, args.waveform)
+        injection_parameters(args.waveform, args.inj_overrides)  # validate mass combos early
+    except ValueError as exc:
+        p.error(str(exc))
+    amp_key = WAVEFORMS[args.waveform]["amplitude"]
+    if args.inj_snr is not None and amp_key in args.inj_overrides:
+        p.error(f"--inj-snr sets {amp_key} for {args.waveform}; don't also pass it with --inj-param")
+    # --inj-param ra/dec/psi wins over --inj-ra/--inj-dec/--inj-psi
+    RA_INJ = args.inj_overrides.get("ra", RA_INJ)
+    DEC_INJ = args.inj_overrides.get("dec", DEC_INJ)
+    PSI_INJ = args.inj_overrides.get("psi", PSI_INJ)
 
     t0 = time.perf_counter()
     (template, likelihood, params, ellipticity, inj_snr, df, freqs, psd, true_signal,
@@ -443,6 +533,7 @@ def main():
     print(f"[setup] waveform={args.waveform} device={template.backend_name} band=[{args.fmin},{args.fmax}]Hz "
           f"n_freq={template.frequency_array_masked().size} injected_network_SNR={inj_snr:.1f} "
           f"({setup_t:.2f}s)")
+    print("[setup] injection: " + ", ".join(f"{k}={v:.6g}" for k, v in params.items()))
 
     spec = build_wavelet_priors(duration=args.duration, minimum_frequency=args.fmin,
                                 maximum_frequency=args.fmax, nleaves_max=args.nleaves_max,
@@ -861,6 +952,8 @@ def main():
                  extrinsic=(sampler.get_chain()["extrinsic"][:, 0].reshape(-1, 4).astype(np.float32)
                             if "extrinsic" in sampler.get_chain() else np.zeros((0, 4))),
                  inj_sky=np.array([RA_INJ, DEC_INJ, PSI_INJ]),
+                 inj_param_names=np.array(list(params)),
+                 inj_param_values=np.array(list(params.values()), dtype=float),
                  sampled_steps=sampled_steps, sample_seconds=sample_t, per_step=per_step,
                  device=template.backend_name, overlap=ov, rec_snr=rs,
                  recon_median=summ["median"], recon_band_lo=summ["band_lo"],
