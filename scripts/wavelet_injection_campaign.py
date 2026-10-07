@@ -1,6 +1,6 @@
 """Injection campaign: waveform-agnostic wavelet reconstruction of many signals.
 
-Where ``<family>_wavelet_reconstruction.py`` injects *one* hand-picked signal,
+Where ``wavelet_reconstruction.py --waveform <family>`` injects *one* hand-picked signal,
 this script draws the source parameters of ``N`` signals from a prior
 distribution and reconstructs each one:
 
@@ -107,7 +107,7 @@ def _sg_priors():
         frequency=Uniform(40.0, 400.0),
         hrss=LogUniform(2.5e-23, 2.5e-22),
         phase=Uniform(0.0, 2 * np.pi, boundary="periodic"),
-        eccentricity=DeltaFunction(0.0),         # linearly polarised, as in sg_wavelet_reconstruction.py
+        eccentricity=DeltaFunction(0.0),         # linearly polarised, as in wavelet_reconstruction.py --waveform sg
         shifts=DeltaFunction(0.0),
         **_sky_priors(),
     ))
@@ -274,7 +274,7 @@ def draw_injection(args, prior, index, seed_seq):
 def reconstruction_summary(sampler, template, true_signal, psd, *, sample_sky,
                            data=None, fixed_sky=None, n_draws=800, discard_frac=0.3, chunk=200, seed=0,
                            time_domain=True):
-    """Posterior reconstruction vs injection (see bbh_wavelet_reconstruction.py).
+    """Posterior reconstruction vs injection (see wavelet_reconstruction.py).
 
     Network overlap ``<h_rec|h_inj> / sqrt(<h_rec|h_rec><h_inj|h_inj>)`` and
     recovered SNR ``sqrt(<h_rec|h_rec>)`` per posterior draw, plus the median and
@@ -402,7 +402,7 @@ def gpu_check(args, prob, params, seed):
 
 
 def run_inference(args, prob, seed, backend_file=None):
-    """Eryn RJ-MCMC wavelet reconstruction of one injection (cf. bbh_wavelet_reconstruction.py)."""
+    """Eryn RJ-MCMC wavelet reconstruction of one injection (cf. wavelet_reconstruction.py)."""
     template, likelihood = prob["template"], prob["likelihood"]
     data_noisy, psd, df = prob["data"], prob["psd"], prob["df"]
     params, ellipticity = prob["params"], prob["ellipticity"]
@@ -527,7 +527,7 @@ def run_inference(args, prob, seed, backend_file=None):
         gen = {b: guided[b] for b in branch_names}
         if args.proposal in ("fisher", "mffisher") and args.num_try > 1:
             # MTDistGenMoveRJ changes one model at a time: signal branch only
-            # (see bbh_wavelet_reconstruction.py for the details).
+            # (see wavelet_reconstruction.py for the details).
             gen_signal = {"signal": guided["signal"]}
             mt_kw = dict(num_try=args.num_try, nleaves_max=nmax, nleaves_min=nmin)
             if "extrinsic" in branch_names:
@@ -814,7 +814,7 @@ def main():
     p.add_argument("--pd-tol", type=float, default=0.02)
     p.add_argument("--proposal", choices=["standard", "guided", "flow", "fisher", "flowfisher",
                                           "fisherflow", "mffisher", "mlflow"],
-                   default="standard", help="see bbh_wavelet_reconstruction.py --help")
+                   default="standard", help="see wavelet_reconstruction.py --help")
     p.add_argument("--mlflow-ckpt", type=str, default=None)
     p.add_argument("--num-try", type=int, default=1)
     p.add_argument("--stretch", type=float, default=0.0)

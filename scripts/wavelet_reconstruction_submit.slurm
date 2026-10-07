@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --nodes=1
-#SBATCH --job-name=wnb_reconstruction
+#SBATCH --job-name=wavelet_reconstruction
 #SBATCH --account=bcse-delta-gpu
 #SBATCH --output=/scratch/bcse/jredepenning/hyperwave_outdir/%x.out
 #SBATCH --error=/scratch/bcse/jredepenning/hyperwave_outdir/%x.err
@@ -19,7 +19,7 @@ HW_OUTFILE=${HW_OUTDIR}/${RUN_TYPE}_reconstruction
 
 source /projects/bcse/jredepenning/HyperWave/.venv/bin/activate
 
-python /projects/bcse/jredepenning/HyperWave/scripts/${RUN_TYPE}_wavelet_reconstruction.py --device gpu \
+python /projects/bcse/jredepenning/HyperWave/scripts/wavelet_reconstruction.py --waveform ${RUN_TYPE} --device gpu \
     --proposal flowfisher --converge --check-every 200 --target-ess 3000 --thin 6 \
     --nsteps 24000 --burn 2000 --nwalkers 50 --ntemps 20 --nleaves-max 50 --seed 0 \
     --recon-plot ${HW_OUTDIR} --outfile ${HW_OUTFILE}

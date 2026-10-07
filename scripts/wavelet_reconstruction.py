@@ -1,9 +1,18 @@
-"""Timed BBH injection + waveform-agnostic wavelet reconstruction (CPU/GPU).
+"""Timed injection + waveform-agnostic wavelet reconstruction (CPU/GPU).
 
 End-to-end demo:
 
 1. generate detector noise (analytic design PSD) for a network,
-2. inject a CBC (IMRPhenomPv2 via the LAL backend) into the data,
+2. inject one signal, chosen with ``--waveform``:
+
+   ============  ====================================================
+   ``bbh``       CBC, IMRPhenomPv2 via the LAL backend (default)
+   ``sg``        sine-Gaussian (ml4gw)
+   ``cs``        cosmic-string cusp (ml4gw)
+   ``gaussian``  Gaussian burst (ml4gw)
+   ``wnb``       white-noise burst (ml4gw)
+   ============  ====================================================
+
 3. reconstruct it with a *variable* number of Morlet-Gabor wavelets using Eryn
    reversible-jump MCMC, with the induced-SNR prior, and
 4. report wall-clock timing (and project it against a reference runtime).
@@ -16,11 +25,11 @@ selected device (NumPy or CuPy).
 
 Run::
 
-    python examples/bbh_wavelet_reconstruction.py --device gpu --nsteps 2000
-    python examples/bbh_wavelet_reconstruction.py --device cpu --nsteps 500
+    python scripts/wavelet_reconstruction.py --waveform bbh --device gpu --nsteps 2000
+    python scripts/wavelet_reconstruction.py --waveform wnb --device cpu --nsteps 500
 
-The sky location and ellipticity are held fixed at the injected values (the
-fast, GPU-batched regime); sampling them jointly is a documented extension.
+By default the sky (ra, dec, psi, ellipticity) is sampled alongside the
+wavelets; ``--fixed-sky`` holds it at the injected values (fast single-branch path).
 """
 
 from __future__ import annotations
@@ -29,7 +38,6 @@ import argparse
 import copy
 import os
 import time
-import torch
 
 import numpy as np
 
@@ -63,29 +71,83 @@ from hyperwave.likelihoods import WaveletLikelihood  # noqa: E402
 from hyperwave.ml4gw import torch_cuda_available  # noqa: E402
 from hyperwave.plots import wavelet_reconstruction as wr  # noqa: E402
 
-CS_PARAMETER_NAMES = [
-    "power", "amplitude", "f_high", "psi",
-    "ra", "dec",
-]
-
 
 RA_INJ, DEC_INJ, PSI_INJ = 1.375, -0.2108, 1.1
 
 
-def make_cs(seed):
-    power = -4.0 / 3.0
-    amplitude = 6.0e-21
-    f_high = 1000.0
+def make_bbh():
+    """A moderate-SNR BBH (component masses ~36/29 Msun)."""
+    m1, m2 = 36.0, 29.0
+    q = m2 / m1
+    mc = (m1 + m2) * (m1 * m2 / (m1 + m2) ** 2) ** 0.6
+    cos_iota = np.cos(0.4)
     params = dict(
-        power=power, amplitude=amplitude, f_high=f_high, psi=PSI_INJ,
-        ra=RA_INJ, dec=DEC_INJ,
+        chirp_mass=mc, mass_ratio=q, luminosity_distance=600.0, psi=PSI_INJ, phase=0.9,
+        ra=RA_INJ, dec=DEC_INJ, chi_1=0.0, chi_2=0.0, cos_theta_jn=cos_iota,
+        cos_tilt_1=1.0, cos_tilt_2=1.0, phi_12=0.0, phi_jl=0.0,
     )
-    theta = [params[k] for k in CS_PARAMETER_NAMES]
     # CBC cross-polarisation convention (lalsimulation): h_cross = -eps * i * h_plus,
     # with eps = 2 cos(iota) / (1 + cos^2 iota). The sign matters for the fixed-sky
     # path; when the sky is sampled, ellipticity is free over [-1, 1].
-    ellipticity = 0.0
-    return params, theta, ellipticity
+    ellipticity = -2.0 * cos_iota / (1.0 + cos_iota**2)
+    return params, ellipticity
+
+
+def make_sg():
+    params = dict(
+        hrss=4.2e-22, quality=20.0, frequency=100.0, eccentricity=0.0,
+        phase=0.0, shifts=0.0, psi=PSI_INJ, ra=RA_INJ, dec=DEC_INJ,
+    )
+    return params, 0.0
+
+
+def make_cs():
+    params = dict(
+        power=-4.0 / 3.0, amplitude=6.0e-21, f_high=1000.0, psi=PSI_INJ,
+        ra=RA_INJ, dec=DEC_INJ,
+    )
+    return params, 0.0
+
+
+def make_gaussian():
+    params = dict(
+        hrss=7.7e-19, polarization=0.0, eccentricity=0.0, duration=1.0e-3, psi=PSI_INJ,
+        ra=RA_INJ, dec=DEC_INJ,
+    )
+    return params, 0.0
+
+
+def make_wnb():
+    params = dict(
+        frequency=500.0, bandwidth=250.0, eccentricity=0.0, phase=0.0,
+        int_hdot_squared=1.7e-37, duration=0.05, psi=PSI_INJ, ra=RA_INJ, dec=DEC_INJ,
+    )
+    return params, 0.0
+
+
+# Injected waveform families: approximant, waveform backend (None = GW's default,
+# LAL), the parameter order the injector expects, and the injection builder.
+WAVEFORMS = {
+    "bbh": dict(
+        approximant="IMRPhenomPv2", waveform_backend=None, make=make_bbh,
+        parameters=["chirp_mass", "mass_ratio", "luminosity_distance", "psi", "phase",
+                    "ra", "dec", "chi_1", "chi_2", "cos_theta_jn", "cos_tilt_1",
+                    "cos_tilt_2", "phi_12", "phi_jl"]),
+    "sg": dict(
+        approximant="SineGaussian", waveform_backend="ml4gw", make=make_sg,
+        parameters=["quality", "frequency", "hrss", "phase", "eccentricity", "shifts",
+                    "psi", "ra", "dec"]),
+    "cs": dict(
+        approximant="CosmicString", waveform_backend="ml4gw", make=make_cs,
+        parameters=["power", "amplitude", "f_high", "psi", "ra", "dec"]),
+    "gaussian": dict(
+        approximant="Gaussian", waveform_backend="ml4gw", make=make_gaussian,
+        parameters=["hrss", "polarization", "eccentricity", "duration", "psi", "ra", "dec"]),
+    "wnb": dict(
+        approximant="WhiteNoiseBurst", waveform_backend="ml4gw", make=make_wnb,
+        parameters=["frequency", "bandwidth", "eccentricity", "phase", "int_hdot_squared",
+                    "psi", "ra", "dec", "duration"]),
+}
 
 
 def build_problem(args):
@@ -97,14 +159,26 @@ def build_problem(args):
                           minimum_frequency=fmin, maximum_frequency=fmax)
     noise.generate_noise(real_noise=False, seed=args.seed)
 
-    params, theta, ellipticity = make_cs(args.seed)
-    injector = GW(noise, approximant="CosmicString", reference_frequency=50.0,
-                  parameters=CS_PARAMETER_NAMES,
-                  static_parameters={"geocent_time": trigger_time},
-                  waveform_backend='ml4gw')
+    fam = WAVEFORMS[args.waveform]
+    params, ellipticity = fam["make"]()
+    theta = [params[k] for k in fam["parameters"]]
+    kw = {} if fam["waveform_backend"] is None else {"waveform_backend": fam["waveform_backend"]}
+    injector = GW(noise, approximant=fam["approximant"], reference_frequency=50.0,
+                  parameters=fam["parameters"],
+                  static_parameters={"geocent_time": trigger_time}, **kw)
 
-    torch.manual_seed(args.seed)
-    injector.make_injections_to_ifo(theta)  # add the WNB to the data
+    # ml4gw's WhiteNoiseBurst draws its noise with an unseeded torch.randn, so seed
+    # torch before every ml4gw generation: this makes the injection reproducible
+    # (the CPU gpu-check twin must see the SAME data) and makes the "pure signal"
+    # regenerated below identical to the one actually injected. The LAL path is
+    # deterministic and doesn't need torch at all.
+    def seed_torch():
+        if fam["waveform_backend"] == "ml4gw":
+            import torch
+            torch.manual_seed(args.seed)
+
+    seed_torch()
+    injector.make_injections_to_ifo(theta)  # add the signal to the data
 
     f, asd0 = injector.detector_asd_masked(0)
     asd1 = injector.detector_asd_masked(1)[1]
@@ -113,7 +187,7 @@ def build_problem(args):
     df = f[1] - f[0]
 
     # pure injected signal (no data mutation) for the network optimal SNR
-    torch.manual_seed(args.seed)
+    seed_torch()
     signal = injector.make_injections_to_ifo_batch(np.array([theta]))[0]
     inj_snr = network_optimal_snr(signal, psd, df)
 
@@ -257,6 +331,8 @@ def amortized_initial_state(ckpt_path, data_noisy, psd, df, nt, nw, lmax, rng):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--waveform", choices=sorted(WAVEFORMS), default="bbh",
+                   help="injected signal family (see the module docstring)")
     p.add_argument("--device", choices=["cpu", "gpu"], default="cpu")
     p.add_argument("--duration", type=float, default=4.0)
     p.add_argument("--fs", type=float, default=2048.0)
@@ -273,6 +349,9 @@ def main():
     p.add_argument("--rho-star", type=float, default=5.0,
                    help="peak of the per-wavelet induced-SNR prior (rho_*); raise "
                         "(e.g. 8-10) to allow higher per-wavelet SNR / more recovered power")
+    p.add_argument("--sky-step", type=float, default=0.01,
+                   help="std [rad] of the sky-only Gaussian move on ra/dec/psi "
+                        "(half that on ellipticity); was 0.1 inside a joint move")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--inj-ra", type=float, default=None, help="override injected RA [rad]")
     p.add_argument("--inj-dec", type=float, default=None, help="override injected Dec [rad]")
@@ -282,6 +361,13 @@ def main():
     p.add_argument("--fixed-sky", dest="sample_sky", action="store_false",
                    help="hold the sky fixed at the injected values (fast single-branch path)")
     p.add_argument("--outfile", type=str, default=None)
+    p.add_argument("--backend-file", type=str, default=None,
+                   help="path to an HDF5 file for Eryn's disk-backed chain storage "
+                        "(HDFBackend) -- the default in-memory backend holds the full "
+                        "(nsteps, ntemps, nwalkers, nleaves_max, ndim) chain in RAM, "
+                        "which OOMs for long high-nleaves runs; pass this to stream the "
+                        "chain to disk instead. Any existing file at this path is "
+                        "overwritten (this script does not support resuming a run).")
     p.add_argument("--production-steps", type=int, default=5000,
                    help="reference production length for the timing projection")
     p.add_argument("--reference-hours", type=float, default=4.0,
@@ -354,7 +440,7 @@ def main():
      data_noisy) = build_problem(args)
     ra, dec, psi = params["ra"], params["dec"], params["psi"]
     setup_t = time.perf_counter() - t0
-    print(f"[setup] device={template.backend_name} band=[{args.fmin},{args.fmax}]Hz "
+    print(f"[setup] waveform={args.waveform} device={template.backend_name} band=[{args.fmin},{args.fmax}]Hz "
           f"n_freq={template.frequency_array_masked().size} injected_network_SNR={inj_snr:.1f} "
           f"({setup_t:.2f}s)")
 
@@ -372,10 +458,17 @@ def main():
         ndims = {"signal": 5, "extrinsic": 4}
         nmax = {"signal": lmax, "extrinsic": 1}
         nmin = {"signal": 0, "extrinsic": 1}
-        moves = [(GaussianMove({
-            "signal": np.diag(np.array([0.05, 5.0, 1.0, 1.0, 0.3]) ** 2),
-            "extrinsic": np.diag(np.array([0.1, 0.1, 0.1, 0.05]) ** 2),
-        }), 1.0)]
+        # Separate (Gibbs) moves for the wavelets and the sky: a joint move has to
+        # get both right at once, and a sky jump of ~6 deg alone is rejected at
+        # these SNRs, so the cold chain almost never proposed a new sky position
+        # (in-model acceptance ~0.6%) -- its sky samples were a small pool of
+        # states swapped down from the hot chains, i.e. spiky sky maps.
+        moves = [
+            (GaussianMove({"signal": np.diag(np.array([0.05, 5.0, 1.0, 1.0, 0.3]) ** 2)},
+                          gibbs_sampling_setup="signal"), 0.5),
+            (GaussianMove({"extrinsic": np.diag((args.sky_step * np.array([1.0, 1.0, 1.0, 0.5])) ** 2)},
+                          gibbs_sampling_setup="extrinsic"), 0.5),
+        ]
 
         def log_like_fn(params, groups):
             return likelihood.grouped_log_like_sky(params, groups)
@@ -452,6 +545,7 @@ def main():
     if args.converge:
         stopper = WaveletConvergenceStopping(
             nleaves_branch="signal", nleaves_max=lmax,
+            sky_branch="extrinsic" if args.sample_sky else None,
             autocorr_mult=args.autocorr_mult, target_ess=args.target_ess,
             pd_tol=args.pd_tol, verbose=True,
         )
@@ -534,7 +628,7 @@ def main():
         else:
             rj_moves = DistributionGenerateRJ(gen, nleaves_max=nmax, nleaves_min=nmin)
         if args.proposal in ("fisher", "mffisher"):
-            moves = fisher_inmodel + [(m, 0.1) for (m, _w) in moves]
+            moves = fisher_inmodel + [(m, 0.1 * w) for (m, w) in moves]
     elif args.proposal == "fisherflow":
         # ISOLATION CONFIG: data-informed (guided) births exactly as in 'fisher',
         # plus an IN-MODEL flow independence move -- so any difference vs 'fisher'
@@ -552,7 +646,7 @@ def main():
             temperature_indices=(0,) if args.flow_train_temps == "cold" else None)
         update_kwargs = dict(update_fn=callback, update_iterations=args.flow_train_every)
         moves = ([(make_flow_distribution_move(flow_branch, gibbs_sampling_setup="signal"), 0.3)]
-                 + fisher_inmodel + [(m, 0.1) for (m, _w) in moves])
+                 + fisher_inmodel + [(m, 0.1 * w) for (m, w) in moves])
         print(f"[fisherflow] device={device} guided births + Fisher cascade + IN-MODEL flow "
               f"(w=0.3), train_every={args.flow_train_every}")
     elif args.proposal == "flowfisher":
@@ -570,7 +664,7 @@ def main():
             flow_branch, every=args.flow_train_every, verbose=True,
             temperature_indices=(0,) if args.flow_train_temps == "cold" else None)
         update_kwargs = dict(update_fn=callback, update_iterations=args.flow_train_every)
-        moves = fisher_inmodel + [(m, 0.1) for (m, _w) in moves]
+        moves = fisher_inmodel + [(m, 0.1 * w) for (m, w) in moves]
         print(f"[flowfisher] device={device} flow births + Fisher in-model, "
               f"train_every={args.flow_train_every}")
     elif args.proposal == "mlflow":
@@ -616,7 +710,7 @@ def main():
                 print(f"[mlflow] residual refresh skipped: {exc}")
         update_kwargs = dict(update_fn=_refresh_residual,
                              update_iterations=args.flow_train_every)
-        moves = fisher_inmodel + [(m, 0.1) for (m, _w) in moves]
+        moves = fisher_inmodel + [(m, 0.1 * w) for (m, w) in moves]
         print(f"[mlflow] device={device} pretrained flow={args.mlflow_ckpt}")
     elif args.proposal == "flow":
         device = "cuda" if (args.device == "gpu" and torch_cuda_available()) else "cpu"
@@ -646,6 +740,13 @@ def main():
     if args.proposal in ("fisher", "flowfisher"):
         temp_kwargs.update(Tmax=np.inf, adaptive=True)
 
+    backend = None
+    if args.backend_file:
+        if os.path.exists(args.backend_file):
+            os.remove(args.backend_file)  # this script always starts a fresh run
+        backend = args.backend_file
+        print(f"[backend] disk-backed chain storage (HDFBackend) -> {backend}")
+
     sampler = EnsembleSampler(
         nw, ndims, log_like_fn, priors,
         tempering_kwargs=temp_kwargs,
@@ -655,6 +756,7 @@ def main():
         moves=moves, rj_moves=rj_moves,
         fill_zero_leaves_val=likelihood.empty_log_likelihood,
         periodic=spec["periodic"],
+        backend=backend,
         **update_kwargs,
         **stop_kwargs,
     )
@@ -755,7 +857,7 @@ def main():
     if args.outfile:
         td = {k: summ[k] for k in ("t", "median_t", "band_lo_t", "band_hi_t", "inj_t")
               if k in summ}
-        np.savez(args.outfile, nleaves=nleaves, inj_snr=inj_snr, converged=converged,
+        np.savez(args.outfile, waveform=args.waveform, nleaves=nleaves, inj_snr=inj_snr, converged=converged,
                  extrinsic=(sampler.get_chain()["extrinsic"][:, 0].reshape(-1, 4).astype(np.float32)
                             if "extrinsic" in sampler.get_chain() else np.zeros((0, 4))),
                  inj_sky=np.array([RA_INJ, DEC_INJ, PSI_INJ]),

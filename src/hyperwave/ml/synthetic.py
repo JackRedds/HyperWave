@@ -109,7 +109,7 @@ def generate_synthetic_signal(
     ----------
     rng : np.random.Generator
     duration, sampling_rate, f_min, f_max : float
-        Analysis-band geometry (matches ``examples/bbh_wavelet_reconstruction.py``).
+        Analysis-band geometry (matches ``scripts/wavelet_reconstruction.py``).
     detectors : sequence of str
         Detector names (e.g. ``("H1", "L1")``).
     psd_amp : float

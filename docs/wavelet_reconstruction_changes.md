@@ -1,5 +1,8 @@
 # Changes to the wavelet reconstruction method and `bbh_wavelet_reconstruction.py`
 
+> `scripts/bbh_wavelet_reconstruction.py` is now `scripts/wavelet_reconstruction.py`
+> (run it with `--waveform bbh`); see 1.8.
+
 This note records the changes made to HyperWave's wavelet (BayesWave-style RJMCMC)
 reconstruction since the "original" baseline, and what each change does.
 
@@ -87,20 +90,51 @@ fresh run and does not resume.
 `(nsteps, ntemps, nwalkers, nleaves_max, ndim)` array in memory, which runs out of
 memory on long runs with a high `nleaves_max`.
 
-### 1.7 Seeded injection (`2bdd62c`)
+### 1.7 Seeded injection, later removed (`2bdd62c`, reverted afterwards)
 
-`torch.manual_seed(args.seed)` is called before both `make_injections_to_ifo` and
-`make_injections_to_ifo_batch`, and `torch` is now imported at the top of the script.
+`2bdd62c` added `torch.manual_seed(args.seed)` before both injection calls and a
+top-level `import torch`, copied from the WNB script. In the WNB script the
+ml4gw/torch backend draws random noise, so the seed keeps the injected data and the
+"pure signal" used for the optimal SNR identical. The BBH script injects with the
+deterministic IMRPhenomPv2/LAL backend, so the seed had no effect. The top-level
+import also meant the script needed `torch` even for CPU/LAL-only runs.
 
-**What it does:** makes the injection reproducible, and makes sure the
-injection added to the data and the "pure signal" used for the optimal SNR are
-identical when the ml4gw/torch backend draws random numbers (needed for the WNB
-script this was shared with). For the deterministic IMRPhenomPv2/LAL BBH injection
-it has no effect.
+Both were later removed from the BBH script. The comment on the injection line,
+which had been changed to "add the WNB to the data", was also put back to "BBH".
+`torch` is now imported only inside the `--init amortized` path, as it was originally.
 
-> Side effects to be aware of: the script now needs `torch` installed even for
-> CPU/LAL-only runs, and the comment on the injection line was copied from the WNB
-> script and now wrongly says "add the WNB to the data".
+### 1.8 One script for all five waveforms
+
+`bbh_wavelet_reconstruction.py` was renamed (with `git mv`, so its history is kept)
+to **`scripts/wavelet_reconstruction.py`**. The four per-waveform copies
+(`sg_`, `cs_`, `gaussian_`, `wnb_wavelet_reconstruction.py`) were deleted. The
+copies were identical to the BBH script apart from the injection.
+
+- A new `--waveform {bbh,sg,cs,gaussian,wnb}` option (default `bbh`) chooses the
+  injected signal. A `WAVEFORMS` table holds each family's approximant, waveform backend
+  (LAL for `bbh`, ml4gw for the others), parameter order and injection values
+  (`make_bbh`, `make_sg`, ...), which are unchanged from the old scripts.
+- `torch` is seeded before each injection only for the ml4gw families, and is
+  imported only then. The `bbh` path still doesn't need torch.
+- The waveform name is printed in the `[setup]` line and saved as `waveform` in
+  the `--outfile` `.npz`.
+- Check: for all five waveforms, `build_problem` in the new script produces
+  bit-for-bit the same injected data, signal, SNR and parameters as the old scripts.
+- **Behaviour change for `cs` and `gaussian`:** those two old scripts had not received
+  1.1–1.6 (they still used the joint sky+wavelet move with 0.1 rad sky steps, had no
+  `--sky-step` or `--backend-file`, used the old move weights, and had no sky
+  convergence check). They now get the same sampler as every other waveform.
+- `wavelet_reconstruction_submit.slurm` and `wavelet_test.sh` now call
+  `wavelet_reconstruction.py --waveform ${RUN_TYPE}`. References in
+  `wavelet_injection_campaign.py`, `docs/wavelets.md` and `hyperwave/ml/synthetic.py`
+  were updated.
+
+Old command → new command:
+
+```bash
+python scripts/wnb_wavelet_reconstruction.py --device gpu ...
+python scripts/wavelet_reconstruction.py --waveform wnb --device gpu ...
+```
 
 ---
 
@@ -198,8 +232,9 @@ New modules: `src/hyperwave/skymap.py` and `src/hyperwave/plots/skymap.py`
 ## 3. Related additions (not changes to the original files)
 
 - Sibling scripts with the same structure for other injected morphologies:
-  `wnb_`, `sg_`, `cs_` and `gaussian_wavelet_reconstruction.py`. They received the same
-  edits as 1.1–1.6.
+  `wnb_`, `sg_`, `cs_` and `gaussian_wavelet_reconstruction.py`. `wnb_` and `sg_`
+  received 1.1–1.6; `cs_` and `gaussian_` only received 1.5. All four have since been
+  merged into `wavelet_reconstruction.py` (see 1.8).
 - `scripts/wavelet_injection_campaign.py` + `injection_campaign_submit.slurm`
   (injection campaigns), and `wavelet_reconstruction_submit.slurm` / `wavelet_test.sh`
   (cluster submission and smoke tests).
