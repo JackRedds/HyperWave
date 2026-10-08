@@ -34,6 +34,7 @@ class GW:
         gpu=False,
         torch_device=None,
         n_jobs=1,
+        generator_kwargs=None,
     ):
         self.noise = noise
         self.reference_frequency = reference_frequency
@@ -77,6 +78,7 @@ class GW:
             n_jobs=n_jobs,
             gpu=gpu,
             torch_device=torch_device,
+            generator_kwargs=generator_kwargs,
         )
         self.waveform_backend = self.template.backend_name
 

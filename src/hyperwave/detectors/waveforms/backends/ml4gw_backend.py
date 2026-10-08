@@ -230,10 +230,16 @@ class ML4GWBurstWaveform(ML4GWWaveform):
     def __init__(
         self,
         *args,
+        generator_kwargs=None,
         **kwargs
     ):
         super().__init__(*args, **kwargs)
-        self._generator = self._approximant(self.sampling_rate, self.duration).to(self._device)
+        # forwarded to the ml4gw generator's constructor, e.g. {"polarized": True}
+        # for WhiteNoiseBurst
+        self.generator_kwargs = dict(generator_kwargs or {})
+        self._generator = self._approximant(
+            self.sampling_rate, self.duration, **self.generator_kwargs
+        ).to(self._device)
 
     def parameter_adapter(self, batch):
         params = {

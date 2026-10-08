@@ -209,6 +209,8 @@ def make_noise_and_injector(args, fam, noise_seed, device=None):
                           minimum_frequency=args.fmin, maximum_frequency=args.fmax)
     noise.generate_noise(real_noise=False, seed=noise_seed)
     kw = {} if fam["waveform_backend"] is None else {"waveform_backend": fam["waveform_backend"]}
+    if args.polarized:
+        kw["generator_kwargs"] = {"polarized": True}
     injector = GW(noise, approximant=fam["approximant"], reference_frequency=50.0,
                   parameters=fam["names"], static_parameters={"geocent_time": TRIGGER_TIME},
                   **kw)
@@ -669,7 +671,7 @@ def save_injection(path, args, index, seed, params, target_snr, prob, res):
     summ = res["summ"]
     td = {k: summ[k] for k in ("t", "median_t", "band_lo_t", "band_hi_t", "inj_t") if k in summ}
     stop_info = {f"stop_{k}": v for k, v in res["stopper"].items()}
-    np.savez(path, index=index, seed=seed, waveform=args.waveform,
+    np.savez(path, index=index, seed=seed, waveform=args.waveform, polarized=args.polarized,
              injection=json.dumps(params), target_snr=np.nan if target_snr is None else target_snr,
              inj_snr=prob["inj_snr"], converged=res["converged"],
              nleaves=res["nleaves"], extrinsic=res["extrinsic"],
@@ -777,6 +779,8 @@ def main():
                    help="rescale each injection's amplitude parameter so its network "
                         "optimal SNR is uniform in [LO, HI] (default: use the drawn amplitude)")
     p.add_argument("--outdir", type=str, default="results/injection_campaign")
+    p.add_argument("--polarized", action="store_true",
+                   help="wnb only: build h_cross from the same noise as h_plus (ml4gw WhiteNoiseBurst(polarized=True)), so the burst is elliptically polarized like the wavelet model instead of unpolarized")
     p.add_argument("--no-resume", dest="resume", action="store_false", default=True,
                    help="re-run injections whose inj_XXXX.npz already exists")
     p.add_argument("--dry-run", action="store_true",
@@ -828,6 +832,8 @@ def main():
     p.add_argument("--init", choices=["default", "amortized"], default="default")
     p.add_argument("--init-ckpt", type=str, default="results/amortized_flow.pt")
     args = p.parse_args()
+    if args.polarized and args.waveform != "wnb":
+        p.error("--polarized only applies to --waveform wnb")
 
     os.makedirs(args.outdir, exist_ok=True)
     if args.summarize_only:

@@ -223,6 +223,8 @@ def build_problem(args):
     params, ellipticity = injection_parameters(args.waveform, args.inj_overrides)
     theta = [params[k] for k in fam["parameters"]]
     kw = {} if fam["waveform_backend"] is None else {"waveform_backend": fam["waveform_backend"]}
+    if args.polarized:
+        kw["generator_kwargs"] = {"polarized": True}
     injector = GW(noise, approximant=fam["approximant"], reference_frequency=50.0,
                   parameters=fam["parameters"],
                   static_parameters={"geocent_time": trigger_time}, **kw)
@@ -438,6 +440,8 @@ def main():
                    help="sample sky position ra/dec/psi/ellipticity (default)")
     p.add_argument("--fixed-sky", dest="sample_sky", action="store_false",
                    help="hold the sky fixed at the injected values (fast single-branch path)")
+    p.add_argument("--polarized", action="store_true",
+                   help="wnb only: build h_cross from the same noise as h_plus (ml4gw WhiteNoiseBurst(polarized=True)), so the burst is elliptically polarized like the wavelet model instead of unpolarized")
     p.add_argument("--outfile", type=str, default=None)
     p.add_argument("--backend-file", type=str, default=None,
                    help="path to an HDF5 file for Eryn's disk-backed chain storage "
@@ -505,6 +509,8 @@ def main():
     p.add_argument("--init-ckpt", type=str, default="results/amortized_flow.pt",
                    help="amortized-flow checkpoint (--init amortized)")
     args = p.parse_args()
+    if args.polarized and args.waveform != "wnb":
+        p.error("--polarized only applies to --waveform wnb")
 
     # apply injection-sky overrides BEFORE any build_problem call, so the GPU
     # problem and its CPU gpu-check twin are built from the SAME injection
@@ -948,7 +954,7 @@ def main():
     if args.outfile:
         td = {k: summ[k] for k in ("t", "median_t", "band_lo_t", "band_hi_t", "inj_t")
               if k in summ}
-        np.savez(args.outfile, waveform=args.waveform, nleaves=nleaves, inj_snr=inj_snr, converged=converged,
+        np.savez(args.outfile, waveform=args.waveform, polarized=args.polarized, nleaves=nleaves, inj_snr=inj_snr, converged=converged,
                  extrinsic=(sampler.get_chain()["extrinsic"][:, 0].reshape(-1, 4).astype(np.float32)
                             if "extrinsic" in sampler.get_chain() else np.zeros((0, 4))),
                  inj_sky=np.array([RA_INJ, DEC_INJ, PSI_INJ]),

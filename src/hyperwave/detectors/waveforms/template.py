@@ -63,10 +63,14 @@ class Template:
         gpu=False,
         torch_device=None,
         sequence=False,
+        generator_kwargs=None,
     ):
         # sequence=True (lal backend only): evaluate exactly at frequency_array,
         # which may be sparse/non-uniform — used by the heterodyne likelihood.
         self.sequence = bool(sequence)
+        # extra constructor kwargs for the ml4gw burst generator
+        # (e.g. {"polarized": True} for WhiteNoiseBurst)
+        self.generator_kwargs = dict(generator_kwargs or {})
         self.detector_names = [str(d) for d in detectors]
         self.detectors = [get_detector(name) for name in self.detector_names]
         self.frequency_array = np.asarray(frequency_array, dtype=float)
@@ -96,6 +100,8 @@ class Template:
     def _build_backend(self, backend, gpu, torch_device):
         backend = str(backend).lower()
         if backend == "lal":
+            if self.generator_kwargs:
+                raise ValueError("generator_kwargs is only supported by the 'ml4gw' backend.")
             return LALCBCWaveform(
                 self.frequency_array,
                 approximant=self.approximant,
@@ -110,6 +116,11 @@ class Template:
                 raise ValueError("sequence=True is only supported by the 'lal' backend.")
             backend_cls = BACKENDS[self.approximant]
             right_pad = float(self.start_time + self.duration - self.trigger_time)
+            kw = {}
+            if self.generator_kwargs:
+                if backend_cls is not ML4GWBurstWaveform:
+                    raise ValueError("generator_kwargs is only supported for ml4gw burst waveforms.")
+                kw["generator_kwargs"] = self.generator_kwargs
             return backend_cls(
                 self.frequency_array,
                 approximant=self.approximant,
@@ -120,7 +131,8 @@ class Template:
                 right_pad=max(0.0, min(right_pad, self.duration)),
                 gpu=gpu,
                 torch_device=torch_device,
-            )       
+                **kw,
+            )
         raise ValueError(f"Unknown waveform backend {backend!r}. Expected 'lal' or 'ml4gw'.")
 
     def _named_from_theta(self, thetas):
